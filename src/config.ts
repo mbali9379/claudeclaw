@@ -15,6 +15,7 @@ const envConfig = readEnvFile([
   'DASHBOARD_PORT',
   'DASHBOARD_TOKEN',
   'DASHBOARD_URL',
+  'GOVERNANCE_URL',
 ]);
 
 // ── Multi-agent support ──────────────────────────────────────────────

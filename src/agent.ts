@@ -2,6 +2,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 
 import { PROJECT_ROOT, agentCwd } from './config.js';
 import { readEnvFile } from './env.js';
+import { buildGovernanceHooks } from './governance.js';
 import { logger } from './logger.js';
 
 export interface UsageInfo {
@@ -153,9 +154,15 @@ export async function runAgent(
         // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/ and user settings
         settingSources: ['project', 'user'],
 
-        // Skip all permission prompts — this is a trusted personal bot on your own machine
+        // Skip all permission prompts — this is a trusted personal bot on your own machine.
+        // Governance enforcement happens via PreToolUse hooks below, not permission prompts.
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
+
+        // Governance middleware hooks — routes tool calls through the Agent Daemon
+        // (localhost:3004) for zone-aware constraint checking before execution.
+        // If the daemon isn't running, hooks fail-open (tools execute ungoverned).
+        hooks: buildGovernanceHooks(),
 
         // Pass secrets to the subprocess without polluting our own process.env
         env: sdkEnv,
