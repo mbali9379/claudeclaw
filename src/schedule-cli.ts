@@ -26,15 +26,13 @@ import { computeNextRun } from './scheduler.js';
 
 initDatabase();
 
-// Parse --agent flag from anywhere in argv, fall back to CLAUDECLAW_AGENT_ID env var
+// Parse --agent flag from anywhere in argv
 const agentFlagIdx = process.argv.indexOf('--agent');
-const cliAgentId = agentFlagIdx !== -1
-  ? process.argv[agentFlagIdx + 1] ?? 'main'
-  : process.env.CLAUDECLAW_AGENT_ID ?? 'main';
-// Remove --agent and its value from rest args (only filter when flag is present)
+const cliAgentId = agentFlagIdx !== -1 ? process.argv[agentFlagIdx + 1] ?? 'main' : 'main';
+// Remove --agent and its value from rest args (only filter when --agent is present)
 const cleanedArgv = agentFlagIdx !== -1
   ? process.argv.filter((_, i) => i !== agentFlagIdx && i !== agentFlagIdx + 1)
-  : [...process.argv];
+  : process.argv;
 const [, , command, ...rest] = cleanedArgv;
 
 function formatDate(unix: number | null): string {
