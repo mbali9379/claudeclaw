@@ -2,7 +2,6 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 
 import { PROJECT_ROOT, agentCwd } from './config.js';
 import { readEnvFile } from './env.js';
-import { buildGovernanceHooks } from './governance.js';
 import { logger } from './logger.js';
 
 export interface UsageInfo {
@@ -109,6 +108,7 @@ export async function runAgent(
   onProgress?: (event: AgentProgressEvent) => void,
   model?: string,
   abortController?: AbortController,
+  onStreamText?: (accumulatedText: string) => void,
 ): Promise<AgentResult> {
   // Read secrets from .env without polluting process.env.
   // CLAUDE_CODE_OAUTH_TOKEN is optional — the subprocess finds auth via ~/.claude/
@@ -130,6 +130,7 @@ export async function runAgent(
   let preCompactTokens: number | null = null;
   let lastCallCacheRead = 0;
   let lastCallInputTokens = 0;
+  let streamedText = '';
 
   // Refresh typing indicator on an interval while Claude works.
   // Telegram's "typing..." action expires after ~5s.
@@ -154,18 +155,15 @@ export async function runAgent(
         // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/ and user settings
         settingSources: ['project', 'user'],
 
-        // Skip all permission prompts — this is a trusted personal bot on your own machine.
-        // Governance enforcement happens via PreToolUse hooks below, not permission prompts.
+        // Skip all permission prompts — this is a trusted personal bot on your own machine
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
 
-        // Governance middleware hooks — routes tool calls through the Agent Daemon
-        // (localhost:3004) for zone-aware constraint checking before execution.
-        // If the daemon isn't running, hooks fail-open (tools execute ungoverned).
-        hooks: buildGovernanceHooks(),
-
         // Pass secrets to the subprocess without polluting our own process.env
         env: sdkEnv,
+
+        // Stream partial text so Telegram can show progressive updates
+        includePartialMessages: !!onStreamText,
 
         // Model override (e.g. 'claude-haiku-4-5', 'claude-sonnet-4-5')
         ...(model ? { model } : {}),
@@ -192,11 +190,12 @@ export async function runAgent(
         );
       }
 
-      // Track per-call token usage from assistant message events.
+      // Track per-call token usage and detect tool use from assistant message events.
       // Each assistant message represents one API call; its usage reflects
       // that single call's context size (not cumulative across the turn).
       if (ev['type'] === 'assistant') {
-        const msgUsage = (ev['message'] as Record<string, unknown>)?.['usage'] as Record<string, number> | undefined;
+        const msg = ev['message'] as Record<string, unknown> | undefined;
+        const msgUsage = msg?.['usage'] as Record<string, number> | undefined;
         const callCacheRead = msgUsage?.['cache_read_input_tokens'] ?? 0;
         const callInputTokens = msgUsage?.['input_tokens'] ?? 0;
         if (callCacheRead > 0) {
@@ -205,12 +204,18 @@ export async function runAgent(
         if (callInputTokens > 0) {
           lastCallInputTokens = callInputTokens;
         }
-      }
 
-      // Tool progress events — surface to dashboard (not Telegram to avoid spam)
-      if (ev['type'] === 'tool_progress' && onProgress) {
-        const name = (ev['tool_name'] as string) ?? 'unknown';
-        onProgress({ type: 'tool_active', description: toolLabel(name) });
+        // Extract tool_use blocks from assistant content for progress reporting
+        if (onProgress) {
+          const content = msg?.['content'] as Array<{ type: string; name?: string }> | undefined;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'tool_use' && block.name) {
+                onProgress({ type: 'tool_active', description: toolLabel(block.name) });
+              }
+            }
+          }
+        }
       }
 
       // Sub-agent lifecycle events — surface to Telegram for user feedback
@@ -225,6 +230,23 @@ export async function runAgent(
           type: 'task_completed',
           description: status === 'failed' ? `Failed: ${summary}` : summary,
         });
+      }
+
+      // Stream text deltas for progressive Telegram updates.
+      // Only stream the outermost assistant response (parent_tool_use_id === null)
+      // to avoid showing internal tool-use reasoning.
+      if (ev['type'] === 'stream_event' && onStreamText && ev['parent_tool_use_id'] === null) {
+        const streamEvent = ev['event'] as Record<string, unknown> | undefined;
+        if (streamEvent?.['type'] === 'content_block_delta') {
+          const delta = streamEvent['delta'] as Record<string, unknown> | undefined;
+          if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string') {
+            streamedText += delta['text'];
+            onStreamText(streamedText);
+          }
+        }
+        if (streamEvent?.['type'] === 'message_start') {
+          streamedText = '';
+        }
       }
 
       if (ev['type'] === 'result') {
