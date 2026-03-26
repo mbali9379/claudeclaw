@@ -1,162 +1,152 @@
 ---
 name: gmail
-description: Manage your Gmail inbox from Claude Code. List, read, triage, reply, send, and create filters.
-allowed-tools: Bash(CLAUDECLAW_DIR=* ~/.venv/bin/python3 ~/.config/gmail/gmail.py *)
+description: Manage your Gmail inbox from Claude Code using the Google Workspace CLI (gws). Triage, read, reply, send, and forward emails.
+allowed-tools: Bash(gws gmail *)
 ---
 
 # Gmail Skill
 
 ## Purpose
 
-Read, triage, reply, and send emails from your Gmail inbox via Claude Code.
+Read, triage, reply, send, and forward emails from your Gmail inbox using the `gws` CLI.
 
-## Environment
+## Prerequisites
 
-The Gmail CLI reads credential paths from environment variables, loaded from ClaudeClaw's `.env` via `CLAUDECLAW_DIR`. Every command MUST use this prefix:
-
-```
-CLAUDECLAW_DIR=/path/to/claudeclaw
-```
-
-Your `.env` should contain:
-
-```
-GOOGLE_CREDS_PATH=~/.config/gmail/credentials.json
-GMAIL_TOKEN_PATH=~/.config/gmail/token.json
-```
-
-If these aren't set, the script falls back to `~/.config/gmail/credentials.json` and `~/.config/gmail/token.json`.
+- `@googleworkspace/cli` installed globally (`npm install -g @googleworkspace/cli`)
+- Authenticated via `gws auth login` with a Google Workspace account
+- Gmail API enabled in the GCP project
 
 ## Commands
 
-### List inbox (full inbox, grouped by thread)
+### Triage inbox (unread summary)
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py list --all
+gws gmail +triage
 ```
 
-Returns JSON array grouped by thread. Each entry has: `id`, `threadId`, `from`, `subject`, `date`, `snippet`, `unread`, `thread_count`. If `thread_count > 1`, also includes `all_ids`.
+Returns a table of unread messages: sender, subject, date.
 
-**This is the default command.** Always use `--all` unless the user specifically asks for a time-filtered view.
-
-### List with time filter
+### Triage with filters
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py list --hours 48
+gws gmail +triage --max 10
+gws gmail +triage --query 'from:client@example.com'
+gws gmail +triage --query 'is:unread after:2026/03/20'
+gws gmail +triage --labels
 ```
 
-### Read full email
+### Read a specific email
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py read <msg_id>
+gws gmail +read --id MESSAGE_ID
 ```
 
-### Move email to label/folder
+### Read with headers
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py move <msg_id> "Label Name"
+gws gmail +read --id MESSAGE_ID --headers
 ```
 
-- If the label doesn't exist, it creates it automatically
-- Removes from INBOX, adds to target label, marks as read
-
-### List all labels
+### Read as JSON
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py labels
+gws gmail +read --id MESSAGE_ID --format json
 ```
 
 ### Reply to an email
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py reply <msg_id> "Your reply body here"
+gws gmail +reply --message-id MESSAGE_ID --body 'Thanks, got it!'
 ```
 
-- Automatically threads correctly (In-Reply-To, References headers)
-- Prefixes subject with "Re:" if not already there
-- Replies to the sender's From/Reply-To address
-
-### Reply with attachments
+### Reply with CC and attachments
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py reply <msg_id> "Your reply body here" --attachments "/path/to/file1.pdf,/path/to/file2.png"
+gws gmail +reply --message-id MESSAGE_ID --body 'Looping in Carol' --cc carol@example.com -a report.pdf
+```
+
+### Reply all
+
+```bash
+gws gmail +reply-all --message-id MESSAGE_ID --body 'Noted, thanks everyone.'
+```
+
+### Forward an email
+
+```bash
+gws gmail +forward --message-id MESSAGE_ID --to recipient@example.com --body 'FYI, see below.'
 ```
 
 ### Send a new email
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py send "to@example.com" "Subject here" "Body here"
+gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice!'
 ```
 
-### Send with attachments
+### Send with CC, BCC, and attachments
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py send "to@example.com" "Subject" "Body" --attachments "/path/to/file.pdf,/path/to/other.xlsx"
+gws gmail +send --to alice@example.com --subject 'Report' --body 'See attached' --cc bob@example.com -a report.pdf -a data.csv
 ```
 
-### Create a Gmail filter (auto-sort rule)
+### Send HTML email
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py filter --from "sender@example.com" --label "LabelName" --archive --read
+gws gmail +send --to alice@example.com --subject 'Update' --body '<p>Here is the <b>update</b>.</p>' --html
 ```
 
-- `--from` / `--to` / `--subject` / `--query` for criteria
-- `--label` to apply a label, `--archive` to skip inbox, `--read` to mark as read, `--trash` to trash
-- Creates the label automatically if it doesn't exist
-
-### List existing filters
+### Send from alias
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py filters
+gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --from hello@hstm.eu
 ```
 
-### Re-authenticate
+### Watch for new emails (streaming)
 
 ```bash
-CLAUDECLAW_DIR=/path/to/claudeclaw ~/.venv/bin/python3 ~/.config/gmail/gmail.py auth
+gws gmail +watch
 ```
+
+### List messages (raw API)
+
+```bash
+gws gmail users messages list --params '{"userId": "me", "maxResults": 10, "q": "is:unread"}'
+```
+
+### List labels
+
+```bash
+gws gmail users labels list --params '{"userId": "me"}'
+```
+
+### Modify labels (move/archive)
+
+```bash
+gws gmail users messages modify --params '{"userId": "me", "id": "MESSAGE_ID"}' --json '{"removeLabelIds": ["INBOX"], "addLabelIds": ["Label_123"]}'
+```
+
+## Output Formats
+
+All helper commands support `--format`:
+- `json` -- structured, parseable
+- `table` -- human-readable (default for +triage)
+- `text` -- plain text (default for +read)
 
 ## Workflow
 
-1. Run `list --all` to show all inbox emails
-2. Display as a table with columns: #, Unread, From, Subject, Replies, Time
-3. Ask the user which to move and where
-4. Run `move` for each, confirm results
-
-## Display Format
-
-Use a proper markdown table for the inbox:
-
-| # | Unread | From | Subject | Replies | Time |
-|---|--------|------|---------|---------|------|
-| 1 | * | someone@example.com | Re: Project update | 3 | 2h ago |
-| 2 | | newsletter@co.com | Your weekly digest | 1 | 5h ago |
-
-- **Replies** column shows `thread_count` (1 = single message, 2+ = thread)
-- Each row is one thread (conversation), not individual messages
+1. Run `gws gmail +triage` to show unread inbox
+2. Display results to the user
+3. Ask which emails to read, reply to, or act on
+4. Execute the requested action
 
 ## Drafting Rules
 
 - Always draft email content and show the user before sending
 - Never send without confirmation
-
-## One-Time Setup
-
-If `credentials.json` is missing:
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create a project (or select existing)
-3. Enable the **Gmail API** (APIs & Services > Library)
-4. Go to APIs & Services > Credentials
-5. Create an **OAuth 2.0 Client ID** > Desktop app
-6. Download the JSON file
-7. Save it to the path in your `GOOGLE_CREDS_PATH` (default: `~/.config/gmail/credentials.json`)
-8. Run the `auth` command (see above)
-9. Browser opens, sign in, authorize, done
+- Use `--dry-run` to preview what would be sent
 
 ## Error Handling
 
-- If `credentials.json` missing, show setup instructions above
-- If `token.json` missing, run auth automatically
-- If label not found, the script creates it
-- If any command fails, show the error and ask the user what to do
+- If auth fails, run `gws auth login`
+- If API not enabled, point user to GCP console to enable Gmail API
+- If send fails, show error and ask the user what to do

@@ -1,0 +1,121 @@
+version: 1
+last_updated: 2026-03-25
+policy_hierarchy:
+  - legal_regulatory
+  - org_security_compliance
+  - governance_baseline
+  - repo_policy
+  - task_instructions
+
+risk_tiers:
+  low:
+    examples:
+      - docs_only
+      - non_runtime_config
+      - no_behavior_refactor
+    approvals_required: 0
+    checks_required:
+      - ci_pass
+  medium:
+    examples:
+      - feature_change
+      - dependency_update
+      - infra_config_change
+    approvals_required: 1
+    approval_roles:
+      - maintainer
+      - reviewer
+    checks_required:
+      - ci_pass
+      - test_evidence
+  high:
+    examples:
+      - auth_or_access_control_change
+      - payment_or_billing_change
+      - secret_management_change
+      - production_deploy
+      - destructive_migration
+    approvals_required: 2
+    approval_roles:
+      - owner
+      - maintainer
+      - reviewer
+    checks_required:
+      - ci_pass
+      - test_evidence
+      - rollback_plan
+      - change_plan
+
+required_controls:
+  - id: C-001
+    name: owner_declared
+    description: Repository must declare a current owner.
+    severity: high
+  - id: C-002
+    name: ci_lint_and_test
+    description: CI must run lint and tests on all PRs.
+    severity: high
+  - id: C-003
+    name: no_secrets_in_repo
+    description: Secrets must not be committed to source control.
+    severity: critical
+  - id: C-004
+    name: audit_trail
+    description: Significant agent actions must be traceable.
+    severity: high
+  - id: C-005
+    name: destructive_change_gate
+    description: Destructive actions require explicit human approval.
+    severity: critical
+  - id: C-006
+    name: dependency_scanning
+    description: Dependency vulnerability and license checks required.
+    severity: medium
+  - id: C-007
+    name: model_registry
+    description: Approved model list and pinning policy must exist.
+    severity: medium
+  - id: C-008
+    name: incident_runbook
+    description: Incident response contact and runbook must be defined.
+    severity: medium
+
+agent_execution_policy:
+  default_mode: restricted
+  require_human_approval_for:
+    - destructive_commands
+    - production_deploy
+    - credential_rotation
+    - data_export_restricted
+  command_policy:
+    allowlist_required: true
+    denylist:
+      - recursive_delete_without_ticket
+      - force_push_default_branch
+      - hard_reset_shared_branch
+
+data_classification:
+  levels:
+    - public
+    - internal
+    - restricted
+  restricted_requirements:
+    - access_controls
+    - prompt_redaction
+    - access_logging
+    - retention_policy
+
+lifecycle:
+  statuses:
+    incubating:
+      support_expectation: best_effort
+      change_velocity: high
+    active:
+      support_expectation: standard
+      change_velocity: medium
+    maintenance:
+      support_expectation: fixes_only
+      change_velocity: low
+    archived:
+      support_expectation: none
+      change_velocity: frozen

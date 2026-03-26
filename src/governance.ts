@@ -5,11 +5,10 @@
  * (localhost:3004) before execution. The daemon checks zone, blast radius,
  * and governance rules, then approves or blocks.
  *
- * This file provides SDK hook callbacks for PreToolUse and PostToolUse.
- *
- * Decision Journal refs:
- *   2026-03-18 — ClaudeClaw bypass permissions: discovery and remediation plan
- *   2026-03-18 — Channel-adaptive governance
+ * IMPORTANT: Claude Code tools (Read, Write, Edit, Bash, Glob, Grep, etc.)
+ * are different from the daemon's internal tools (read_file, write_file, etc.).
+ * This hook maps Claude Code tool names to the daemon's tool names and extracts
+ * the target path from the tool input.
  */
 
 import type {
@@ -25,13 +24,58 @@ import { logger } from './logger.js';
 const GOVERNANCE_URL =
   process.env.GOVERNANCE_URL || 'http://127.0.0.1:3004';
 
-const GOVERNANCE_TIMEOUT = 5000; // 5s timeout
+const GOVERNANCE_TIMEOUT = 5000;
 
 /**
- * Check if the governance daemon is reachable.
- * If not, tools execute ungoverned (fail-open, not fail-closed).
- * This prevents ClaudeClaw from breaking if the daemon isn't running.
+ * Map Claude Code tool names to daemon tool names.
+ * Tools not in this map are allowed by default (fail-open for unknown tools).
  */
+const TOOL_MAP: Record<string, string> = {
+  // Read operations
+  'Read': 'read_file',
+  'Glob': 'search_files',
+  'Grep': 'search_files',
+  'WebFetch': 'read_file',
+  'WebSearch': 'read_file',
+
+  // Write operations
+  'Write': 'write_file',
+  'Edit': 'write_file',
+  'NotebookEdit': 'write_file',
+
+  // Shell
+  'Bash': 'shell',
+
+  // Agent/Task (pass through, no file path to check)
+  'Agent': 'agent',
+  'Task': 'agent',
+  'TaskCreate': 'agent',
+  'TaskUpdate': 'agent',
+  'TodoWrite': 'agent',
+};
+
+/**
+ * Extract the target file path from Claude Code tool input.
+ */
+function extractPath(toolName: string, toolInput: Record<string, unknown>): string | undefined {
+  switch (toolName) {
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+    case 'NotebookEdit':
+      return toolInput.file_path as string | undefined;
+    case 'Glob':
+      return toolInput.path as string | undefined;
+    case 'Grep':
+      return toolInput.path as string | undefined;
+    case 'Bash':
+      // For shell commands, use cwd or try to extract path from command
+      return toolInput.cwd as string | undefined;
+    default:
+      return undefined;
+  }
+}
+
 async function isDaemonAvailable(): Promise<boolean> {
   try {
     const controller = new AbortController();
@@ -48,16 +92,6 @@ async function isDaemonAvailable(): Promise<boolean> {
 
 /**
  * PreToolUse hook: asks the daemon whether this tool call is allowed.
- *
- * Returns:
- *   - { decision: 'approve' } if the daemon says ALLOWED
- *   - { decision: 'block', reason } if the daemon says BLOCKED
- *   - { decision: 'approve' } if the daemon is unreachable (fail-open)
- *
- * For ESCALATED results (terminal channel), the daemon would normally wait
- * for approval. But since ClaudeClaw is always the telegram channel,
- * Tier 2 actions are auto-approved by the daemon. If future channels
- * are added, escalation handling will need to be implemented here.
  */
 async function preToolUseHook(
   input: HookInput,
@@ -67,6 +101,26 @@ async function preToolUseHook(
   const hookInput = input as PreToolUseHookInput;
   const toolName = hookInput.tool_name;
   const toolInput = hookInput.tool_input as Record<string, unknown>;
+
+  // Map to daemon tool name. Unknown tools pass through (fail-open).
+  const daemonTool = TOOL_MAP[toolName];
+  if (!daemonTool) {
+    logger.debug({ tool: toolName }, 'Tool not in governance map, allowing');
+    return { decision: 'approve' };
+  }
+
+  // Agent/Task tools have no file path to check. Allow them.
+  if (daemonTool === 'agent') {
+    return { decision: 'approve' };
+  }
+
+  // Extract target path
+  const targetPath = extractPath(toolName, toolInput);
+
+  // No path to check (e.g., Bash without cwd). Allow.
+  if (!targetPath && daemonTool !== 'shell') {
+    return { decision: 'approve' };
+  }
 
   // Check if daemon is running
   const available = await isDaemonAvailable();
@@ -82,15 +136,25 @@ async function preToolUseHook(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), GOVERNANCE_TIMEOUT);
 
+    const params: Record<string, unknown> = { ...toolInput };
+    if (targetPath) {
+      params.path = targetPath;
+    }
+    // For Bash, pass the command for safety checking
+    if (toolName === 'Bash') {
+      params.command = toolInput.command;
+    }
+
     const res = await fetch(`${GOVERNANCE_URL}/tool`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        tool: toolName,
-        params: toolInput,
+        tool: daemonTool,
+        params,
         channel: `claudeclaw-${hookInput.session_id}`,
         channelType: 'telegram',
         requestId: hookInput.tool_use_id,
+        checkOnly: true,  // Don't execute, just evaluate constraints
       }),
       signal: controller.signal,
     });
@@ -108,7 +172,6 @@ async function preToolUseHook(
     const result = (await res.json()) as {
       status: string;
       reason?: string;
-      result?: { success: boolean; output: string };
     };
 
     if (result.status === 'blocked') {
@@ -123,7 +186,6 @@ async function preToolUseHook(
     }
 
     if (result.status === 'checkpoint') {
-      // Checkpoint on telegram = log it, don't block
       logger.info(
         { tool: toolName, reason: result.reason },
         'Governance checkpoint reached',
@@ -145,30 +207,13 @@ async function preToolUseHook(
 }
 
 /**
- * PostToolUse hook: logs the tool result to the daemon's audit trail.
- * Non-blocking. If the daemon is unavailable, silently skips.
+ * PostToolUse hook: non-blocking audit logging.
  */
 async function postToolUseHook(
   input: HookInput,
   _toolUseId: string | undefined,
   _options: { signal: AbortSignal },
 ): Promise<HookJSONOutput> {
-  // PostToolUse is fire-and-forget logging. Always continue.
-  const hookInput = input as PostToolUseHookInput;
-
-  // Don't block on this. Just fire and forget.
-  try {
-    const available = await isDaemonAvailable();
-    if (available) {
-      logger.debug(
-        { tool: hookInput.tool_name },
-        'PostToolUse logged to governance daemon',
-      );
-    }
-  } catch {
-    // Silent fail. Audit logging is best-effort from PostToolUse.
-  }
-
   return { continue: true };
 }
 
