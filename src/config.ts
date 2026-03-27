@@ -20,6 +20,7 @@ const envConfig = readEnvFile([
   'DB_ENCRYPTION_KEY',
   'GOOGLE_API_KEY',
   'AGENT_TIMEOUT_MS',
+  'AUTO_ROTATE_PCT',
   'SECURITY_PIN_HASH',
   'IDLE_LOCK_MINUTES',
   'EMERGENCY_KILL_PHRASE',
@@ -122,6 +123,12 @@ export const AGENT_TIMEOUT_MS = parseInt(
 export const CONTEXT_LIMIT = parseInt(
   process.env.CONTEXT_LIMIT || envConfig.CONTEXT_LIMIT || '1000000',
   10,
+);
+
+// Auto-rotate session when conversation context exceeds this percentage of available space.
+// Set to 0 to disable auto-rotation (rely on manual /newchat only).
+export const AUTO_ROTATE_PCT = parseFloat(
+  process.env.AUTO_ROTATE_PCT || envConfig.AUTO_ROTATE_PCT || '0.80',
 );
 
 // Dashboard — web UI for monitoring ClaudeClaw state

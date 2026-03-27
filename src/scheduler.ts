@@ -13,6 +13,7 @@ import {
   resetStuckMissionTasks,
 } from './db.js';
 import { logger } from './logger.js';
+import { ingestConversationTurn } from './memory-ingest.js';
 import { messageQueue } from './message-queue.js';
 import { runAgent } from './agent.js';
 import { formatForTelegram, splitMessage } from './bot.js';
@@ -107,12 +108,24 @@ async function runDueTasks(): Promise<void> {
           await sender(chunk);
         }
 
-        // Inject task output into the active chat session so user replies have context
+        // Log truncated task output to conversation_log (dashboard chat history depends on this)
+        // Full output lives in scheduled_tasks.last_result via updateTaskAfterRun below.
         if (ALLOWED_CHAT_ID) {
           const activeSession = getSession(ALLOWED_CHAT_ID, schedulerAgentId);
+          const truncated = text.length > 500
+            ? text.slice(0, 500) + '\n\n[...truncated — full output in scheduled_tasks table]'
+            : text;
           logConversationTurn(ALLOWED_CHAT_ID, 'user', `[Scheduled task]: ${task.prompt}`, activeSession ?? undefined, schedulerAgentId);
-          logConversationTurn(ALLOWED_CHAT_ID, 'assistant', text, activeSession ?? undefined, schedulerAgentId);
+          logConversationTurn(ALLOWED_CHAT_ID, 'assistant', truncated, activeSession ?? undefined, schedulerAgentId);
         }
+
+        // Extract structured memories from task output (fire-and-forget)
+        void ingestConversationTurn(
+          ALLOWED_CHAT_ID || 'scheduler',
+          `[Scheduled task]: ${task.prompt}`,
+          text,
+          schedulerAgentId,
+        ).catch(() => {});
 
         updateTaskAfterRun(task.id, nextRun, text, 'success');
 
@@ -171,12 +184,23 @@ async function runDueMissionTasks(): Promise<void> {
           await sender(chunk);
         }
 
-        // Inject into conversation context so agent can reference it
+        // Log truncated mission output to conversation_log (dashboard needs this)
         if (ALLOWED_CHAT_ID) {
           const activeSession = getSession(ALLOWED_CHAT_ID, schedulerAgentId);
+          const truncated = text.length > 500
+            ? text.slice(0, 500) + '\n\n[...truncated — full output in mission_tasks table]'
+            : text;
           logConversationTurn(ALLOWED_CHAT_ID, 'user', '[Mission task: ' + mission.title + ']: ' + mission.prompt, activeSession ?? undefined, schedulerAgentId);
-          logConversationTurn(ALLOWED_CHAT_ID, 'assistant', text, activeSession ?? undefined, schedulerAgentId);
+          logConversationTurn(ALLOWED_CHAT_ID, 'assistant', truncated, activeSession ?? undefined, schedulerAgentId);
         }
+
+        // Extract structured memories from mission output (fire-and-forget)
+        void ingestConversationTurn(
+          ALLOWED_CHAT_ID || 'mission',
+          `[Mission task: ${mission.title}]: ${mission.prompt}`,
+          text,
+          schedulerAgentId,
+        ).catch(() => {});
       }
 
       emitChatEvent({

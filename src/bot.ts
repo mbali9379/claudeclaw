@@ -18,6 +18,7 @@ import {
   TYPING_REFRESH_MS,
   AGENT_TIMEOUT_MS,
   STREAM_STRATEGY,
+  AUTO_ROTATE_PCT,
 } from './config.js';
 import { clearSession, getRecentConversation, getRecentMemories, getRecentTaskOutputs, getSession, getSessionConversation, logToHiveMind, pinMemory, unpinMemory, setSession, lookupWaChatId, saveWaMessageMap, saveTokenUsage } from './db.js';
 import { logger } from './logger.js';
@@ -55,40 +56,115 @@ const CONTEXT_WARN_PCT = 0.75; // Warn when conversation fills 75% of available 
 const lastUsage = new Map<string, UsageInfo>();
 const sessionBaseline = new Map<string, number>(); // sessionId -> first turn's input_tokens
 
+interface ContextCheckResult {
+  warning: string | null;
+  shouldRotate: boolean;
+  pct: number;
+}
+
 /**
- * Check if context usage is getting high and return a warning string, or null.
+ * Check if context usage is getting high. Returns warning text, rotation flag, and usage %.
  * Uses input_tokens (total context) not cache_read_input_tokens (partial metric).
  */
-function checkContextWarning(chatId: string, sessionId: string | undefined, usage: UsageInfo): string | null {
+function checkContextWarning(chatId: string, sessionId: string | undefined, usage: UsageInfo): ContextCheckResult {
   lastUsage.set(chatId, usage);
 
   if (usage.didCompact) {
-    return '⚠️ Context window was auto-compacted this turn. Some earlier conversation may have been summarized. Consider /newchat + /respin if things feel off.';
+    return {
+      warning: '⚠️ Context window was auto-compacted this turn. Some earlier conversation may have been summarized. Consider /newchat + /respin if things feel off.',
+      shouldRotate: false,
+      pct: 0,
+    };
   }
 
   const contextTokens = usage.lastCallInputTokens;
-  if (contextTokens <= 0) return null;
+  if (contextTokens <= 0) return { warning: null, shouldRotate: false, pct: 0 };
 
   // Record baseline on first turn of session (system prompt overhead)
   const baseKey = sessionId ?? chatId;
   if (!sessionBaseline.has(baseKey)) {
     sessionBaseline.set(baseKey, contextTokens);
     // First turn — no warning, just establishing baseline
-    return null;
+    return { warning: null, shouldRotate: false, pct: 0 };
   }
 
   const baseline = sessionBaseline.get(baseKey)!;
   const available = CONTEXT_LIMIT - baseline;
-  if (available <= 0) return null;
+  if (available <= 0) return { warning: null, shouldRotate: false, pct: 0 };
 
   const conversationTokens = contextTokens - baseline;
   const pct = Math.round((conversationTokens / available) * 100);
 
-  if (pct >= Math.round(CONTEXT_WARN_PCT * 100)) {
-    return `⚠️ Context window at ~${pct}% of available space (~${Math.round(conversationTokens / 1000)}k / ${Math.round(available / 1000)}k conversation tokens). Consider /newchat + /respin soon.`;
+  // Auto-rotate at configured threshold (default 80%)
+  if (AUTO_ROTATE_PCT > 0 && pct >= Math.round(AUTO_ROTATE_PCT * 100)) {
+    return {
+      warning: null,
+      shouldRotate: true,
+      pct,
+    };
   }
 
-  return null;
+  // Warn at 75% threshold
+  if (pct >= Math.round(CONTEXT_WARN_PCT * 100)) {
+    return {
+      warning: `⚠️ Context window at ~${pct}% of available space (~${Math.round(conversationTokens / 1000)}k / ${Math.round(available / 1000)}k conversation tokens). Consider /newchat + /respin soon.`,
+      shouldRotate: false,
+      pct,
+    };
+  }
+
+  return { warning: null, shouldRotate: false, pct };
+}
+
+/**
+ * Auto-rotate session: summarize to hive mind and clear. Same logic as /newchat.
+ */
+async function autoRotateSession(chatIdStr: string, agentId: string): Promise<void> {
+  const oldSessionId = getSession(chatIdStr, agentId);
+
+  if (oldSessionId) {
+    sessionBaseline.delete(oldSessionId);
+
+    // Fire-and-forget: summarize session to hive mind
+    (async () => {
+      try {
+        const turns = getSessionConversation(oldSessionId, 40);
+        if (turns.length < 2) return;
+
+        const summaryAbort = new AbortController();
+        const summaryTimer = setTimeout(() => summaryAbort.abort(), 60_000);
+
+        const result = await runAgent(
+          'Summarize what we accomplished this session in ONE short sentence (under 100 chars). No preamble, no quotes, just the summary.',
+          oldSessionId,
+          () => {},
+          undefined,
+          undefined,
+          summaryAbort,
+        );
+        clearTimeout(summaryTimer);
+
+        const summary = result.text?.trim();
+        if (summary && summary.length > 0) {
+          logToHiveMind(agentId, chatIdStr, 'session_auto_rotate', summary.slice(0, 300));
+          logger.info({ agentId, summary }, 'Hive mind auto-commit (auto-rotation)');
+        }
+      } catch (err) {
+        try {
+          const turns = getSessionConversation(oldSessionId, 40);
+          if (turns.length >= 2) {
+            const firstUserMsg = turns.find(t => t.role === 'user')?.content?.slice(0, 100) || 'unknown';
+            logToHiveMind(agentId, chatIdStr, 'session_auto_rotate', `${turns.length} turns starting with: ${firstUserMsg}`);
+          }
+        } catch { /* give up */ }
+        logger.error({ err }, 'Auto-rotation hive mind summary failed, used fallback');
+      }
+    })();
+  }
+
+  clearSession(chatIdStr, agentId);
+  sessionBaseline.delete(chatIdStr);
+  logger.info({ chatId: chatIdStr, agentId }, 'Session auto-rotated');
 }
 import {
   downloadTelegramFile,
@@ -440,12 +516,15 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
   if (memCtx) parts.push(memCtx);
 
   // Inject recent scheduled task outputs so the user can reply to them naturally.
-  // Without this, Claude has no idea what a scheduled task just showed the user.
+  // Truncated to limit context bloat — full output lives in scheduled_tasks.last_result.
   const recentTasks = getRecentTaskOutputs(AGENT_ID, 30);
   if (recentTasks.length > 0) {
     const taskLines = recentTasks.map((t) => {
       const ago = Math.round((Date.now() / 1000 - t.last_run) / 60);
-      return `[Scheduled task ran ${ago}m ago]\nTask: ${t.prompt}\nOutput:\n${t.last_result}`;
+      const output = t.last_result.length > 500
+        ? t.last_result.slice(0, 500) + '... [truncated]'
+        : t.last_result;
+      return `[Scheduled task ran ${ago}m ago]\nTask: ${t.prompt}\nOutput:\n${output}`;
     });
     parts.push(`[Recent scheduled task context — the user may be replying to this]\n${taskLines.join('\n\n')}\n[End task context]`);
   }
@@ -645,9 +724,12 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
         logger.error({ err: dbErr }, 'Failed to save token usage');
       }
 
-      const warning = checkContextWarning(chatIdStr, activeSessionId, result.usage);
-      if (warning) {
-        await ctx.reply(warning);
+      const ctxCheck = checkContextWarning(chatIdStr, activeSessionId, result.usage);
+      if (ctxCheck.shouldRotate) {
+        await ctx.reply(`Context at ~${ctxCheck.pct}%. Auto-rotating session -- your next message starts fresh.`);
+        await autoRotateSession(chatIdStr, AGENT_ID);
+      } else if (ctxCheck.warning) {
+        await ctx.reply(ctxCheck.warning);
       }
     }
 
@@ -829,54 +911,7 @@ export function createBot(): Bot {
   bot.command('newchat', async (ctx) => {
     if (await replyIfLocked(ctx)) return;
     const chatIdStr = ctx.chat!.id.toString();
-    const oldSessionId = getSession(chatIdStr, AGENT_ID);
-
-    // Auto-commit session summary to hive mind (async, don't block the user)
-    if (oldSessionId) {
-      const sessionToSummarize = oldSessionId;
-      sessionBaseline.delete(oldSessionId);
-
-      // Fire-and-forget: ask the agent to produce a one-liner summary
-      (async () => {
-        try {
-          const turns = getSessionConversation(sessionToSummarize, 40);
-          if (turns.length < 2) return;
-
-          // Timeout after 60s to prevent a stuck summarization from running indefinitely
-          const summaryAbort = new AbortController();
-          const summaryTimer = setTimeout(() => summaryAbort.abort(), 60_000);
-
-          const result = await runAgent(
-            'Summarize what we accomplished this session in ONE short sentence (under 100 chars). No preamble, no quotes, just the summary. Example: "Drafted LinkedIn post about AI agents and scheduled Gmail triage task"',
-            sessionToSummarize,
-            () => {},  // no typing indicator
-            undefined,
-            undefined,
-            summaryAbort,
-          );
-          clearTimeout(summaryTimer);
-
-          const summary = result.text?.trim();
-          if (summary && summary.length > 0) {
-            logToHiveMind(AGENT_ID, chatIdStr, 'session_end', summary.slice(0, 300));
-            logger.info({ agentId: AGENT_ID, summary }, 'Hive mind auto-commit (LLM summary)');
-          }
-        } catch (err) {
-          // Fallback: log a basic summary from conversation turns
-          try {
-            const turns = getSessionConversation(sessionToSummarize, 40);
-            if (turns.length >= 2) {
-              const firstUserMsg = turns.find(t => t.role === 'user')?.content?.slice(0, 100) || 'unknown';
-              logToHiveMind(AGENT_ID, chatIdStr, 'session_end', `${turns.length} turns starting with: ${firstUserMsg}`);
-            }
-          } catch { /* give up */ }
-          logger.error({ err }, 'Hive mind LLM summary failed, used fallback');
-        }
-      })();
-    }
-
-    clearSession(chatIdStr, AGENT_ID);
-    sessionBaseline.delete(chatIdStr);
+    await autoRotateSession(chatIdStr, AGENT_ID);
     await ctx.reply('Session cleared. Starting fresh.');
     logger.info({ chatId: ctx.chat!.id }, 'Session cleared by user');
   });
@@ -1517,7 +1552,10 @@ async function processDashboardMessage(
     if (recentDashTasks.length > 0) {
       const taskLines = recentDashTasks.map((t) => {
         const ago = Math.round((Date.now() / 1000 - t.last_run) / 60);
-        return `[Scheduled task ran ${ago}m ago]\nTask: ${t.prompt}\nOutput:\n${t.last_result}`;
+        const output = t.last_result.length > 500
+          ? t.last_result.slice(0, 500) + '... [truncated]'
+          : t.last_result;
+        return `[Scheduled task ran ${ago}m ago]\nTask: ${t.prompt}\nOutput:\n${output}`;
       });
       dashParts.push(`[Recent scheduled task context — the user may be replying to this]\n${taskLines.join('\n\n')}\n[End task context]`);
     }
