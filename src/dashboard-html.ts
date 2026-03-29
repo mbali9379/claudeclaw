@@ -23,6 +23,23 @@ export function getDashboardHtml(token: string, chatId: string): string {
     --bg-hover: #f0f0f0; --bg-active: #e8e8f4; --bg-menu: #fff;
     --shadow: rgba(0,0,0,0.1);
   }
+  /* Light mode: override Tailwind white text and hardcoded colors */
+  [data-theme="light"] .text-white { color: #1a1a1a !important; }
+  [data-theme="light"] .text-gray-400 { color: #666 !important; }
+  [data-theme="light"] .text-gray-500 { color: #777 !important; }
+  [data-theme="light"] .text-gray-600 { color: #888 !important; }
+  [data-theme="light"] .text-gray-300 { color: #555 !important; }
+  [data-theme="light"] .hover\\:text-white:hover { color: #000 !important; }
+  [data-theme="light"] .bg-\\[\\#1a1a1a\\] { background: #f0f0f0 !important; }
+  [data-theme="light"] .border-\\[\\#2a2a2a\\] { border-color: #e0e0e0 !important; }
+  [data-theme="light"] input, [data-theme="light"] textarea, [data-theme="light"] select { background: #fff !important; color: #1a1a1a !important; border-color: #ddd !important; }
+  [data-theme="light"] .drawer { background: #fff !important; border-color: #e0e0e0 !important; }
+  [data-theme="light"] .drawer-handle { background: #ccc !important; }
+  [data-theme="light"] .cmd-overlay { background: rgba(0,0,0,0.3) !important; }
+  [data-theme="light"] [style*="background:#1a1a1a"], [data-theme="light"] [style*="background: #1a1a1a"] { background: #fff !important; }
+  [data-theme="light"] [style*="background:#141414"], [data-theme="light"] [style*="background: #141414"] { background: #fafafa !important; }
+  [data-theme="light"] [style*="color:#e0e0e0"], [data-theme="light"] [style*="color: #e0e0e0"] { color: #1a1a1a !important; }
+  [data-theme="light"] [style*="border:1px solid #2a2a2a"], [data-theme="light"] [style*="border: 1px solid #2a2a2a"] { border-color: #e0e0e0 !important; }
   body { background: var(--bg-body); color: var(--text-primary); -webkit-tap-highlight-color: transparent; }
   .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
   .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
