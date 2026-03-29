@@ -43,8 +43,53 @@ import {
   updateIssueStatus,
   updateIssueFields,
   getIssuesByStatus,
+  advancePipelineStep,
 } from './db.js';
 import type { IssueStatus } from './db.js';
+
+// ── Pipeline Templates ────────────────────────────────────────────────
+
+export interface PipelineTemplate {
+  id: string;
+  name: string;
+  description: string;
+  steps: string[];  // agent IDs
+}
+
+export function getPipelineTemplates(): PipelineTemplate[] {
+  const agentIds = listAgentIds();
+  const templates: PipelineTemplate[] = [];
+
+  // Content pipeline: write > review > publish
+  // Uses comms if available, falls back to main
+  const writer = agentIds.includes('comms') ? 'comms' : 'main';
+  const reviewer = agentIds.includes('ops') ? 'ops' : 'main';
+  templates.push({
+    id: 'content',
+    name: 'Content Pipeline',
+    description: 'Write, review, then publish',
+    steps: [writer, reviewer, 'main'],
+  });
+
+  // Signal pipeline: scan > extract > file
+  const scanner = agentIds.includes('oracle') ? 'oracle' : 'main';
+  templates.push({
+    id: 'signal',
+    name: 'Signal Pipeline',
+    description: 'Scan sources, extract signals, file to vault',
+    steps: [scanner, 'main'],
+  });
+
+  // Audit pipeline: assess > QA > report
+  templates.push({
+    id: 'audit',
+    name: 'Audit Pipeline',
+    description: 'Assess, QA check, then generate report',
+    steps: ['main', reviewer, 'main'],
+  });
+
+  return templates;
+}
 import { generateContent, parseJsonResponse } from './gemini.js';
 import { getSecurityStatus } from './security.js';
 import { listAgentIds, loadAgentConfig, setAgentModel } from './agent-config.js';
@@ -305,6 +350,39 @@ export function startDashboard(botApi?: Api<RawApi>): void {
     const id = c.req.param('id');
     const ok = deleteMissionTask(id);
     return c.json({ ok });
+  });
+
+  // Resume a paused pipeline
+  app.post('/api/mission/tasks/:id/resume-pipeline', (c) => {
+    const id = c.req.param('id');
+    const task = getMissionTask(id);
+    if (!task) return c.json({ error: 'Not found' }, 404);
+    if (!task.handoff_chain) return c.json({ error: 'Not a pipeline issue' }, 400);
+    if (task.pipeline_status !== 'paused') return c.json({ error: 'Pipeline not paused' }, 400);
+    // Re-queue: set back to in_progress so the scheduler picks it up
+    updateIssueStatus(id, 'in_progress');
+    return c.json({ ok: true });
+  });
+
+  // Skip current pipeline step
+  app.post('/api/mission/tasks/:id/skip-step', (c) => {
+    const id = c.req.param('id');
+    const task = getMissionTask(id);
+    if (!task) return c.json({ error: 'Not found' }, 404);
+    if (!task.handoff_chain) return c.json({ error: 'Not a pipeline issue' }, 400);
+    const chain: string[] = JSON.parse(task.handoff_chain);
+    const nextStep = task.current_step + 1;
+    if (nextStep >= chain.length) {
+      updateIssueStatus(id, 'done');
+      return c.json({ ok: true, status: 'done' });
+    }
+    advancePipelineStep(id, chain[nextStep]);
+    return c.json({ ok: true, step: nextStep, agent: chain[nextStep] });
+  });
+
+  // Pipeline templates
+  app.get('/api/mission/templates', (c) => {
+    return c.json({ templates: getPipelineTemplates() });
   });
 
   // Kanban view: issues grouped by status

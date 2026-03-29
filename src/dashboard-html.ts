@@ -285,6 +285,16 @@ export function getDashboardHtml(token: string, chatId: string): string {
   <div style="padding:0 16px 16px">
     <input type="text" id="mission-title" placeholder="Title" style="width:100%;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;padding:8px 12px;color:#e0e0e0;font-size:13px;outline:none;margin-bottom:8px;box-sizing:border-box" maxlength="200">
     <textarea id="mission-prompt" rows="3" placeholder="What should the agent do?" style="width:100%;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;padding:8px 12px;color:#e0e0e0;font-size:13px;outline:none;resize:vertical;margin-bottom:8px;box-sizing:border-box" maxlength="10000"></textarea>
+    <div id="pipeline-picker" style="margin-bottom:8px">
+      <div class="text-xs text-gray-500 mb-1">Pipeline (optional)</div>
+      <div id="pipeline-templates" class="flex gap-2 flex-wrap"></div>
+      <div id="pipeline-chain-display" style="display:none;margin-top:6px;padding:6px 10px;background:#1a1a2e;border:1px solid #312e81;border-radius:8px">
+        <div class="flex items-center justify-between">
+          <span id="pipeline-chain-text" class="text-xs text-indigo-300"></span>
+          <button onclick="clearPipelineSelection()" style="background:none;border:none;cursor:pointer;color:#6b7280;font-size:12px">&times;</button>
+        </div>
+      </div>
+    </div>
     <div class="flex gap-2 items-center">
       <select id="mission-priority" style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;padding:6px 10px;color:#e0e0e0;font-size:12px;outline:none">
         <option value="0">Low</option>
@@ -1803,8 +1813,22 @@ async function autoAssignAll() {
   btn.disabled = false;
 }
 
-function openMissionModal() {
+var selectedPipeline = null;
+
+async function openMissionModal() {
   document.getElementById('mission-error').style.display = 'none';
+  selectedPipeline = null;
+  document.getElementById('pipeline-chain-display').style.display = 'none';
+
+  // Load pipeline templates
+  try {
+    var data = await api('/api/mission/templates');
+    var container = document.getElementById('pipeline-templates');
+    container.innerHTML = (data.templates || []).map(function(t) {
+      return '<button onclick="selectPipeline(\\'' + t.id + '\\')" style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;padding:4px 10px;font-size:11px;color:#a78bfa;cursor:pointer;transition:border-color 0.15s" title="' + escapeHtml(t.description) + ': ' + t.steps.join(' \\u2192 ') + '">' + escapeHtml(t.name) + '</button>';
+    }).join('');
+  } catch(e) {}
+
   document.getElementById('mission-overlay').style.opacity = '1';
   document.getElementById('mission-overlay').style.pointerEvents = 'auto';
   var m = document.getElementById('mission-modal');
@@ -1812,6 +1836,28 @@ function openMissionModal() {
   m.style.pointerEvents = 'auto';
   m.style.transform = 'translate(-50%,-50%) scale(1)';
   setTimeout(function() { document.getElementById('mission-title').focus(); }, 200);
+}
+
+var pipelineTemplatesCache = null;
+
+async function selectPipeline(templateId) {
+  try {
+    if (!pipelineTemplatesCache) {
+      var data = await api('/api/mission/templates');
+      pipelineTemplatesCache = data.templates || [];
+    }
+    var tmpl = pipelineTemplatesCache.find(function(t) { return t.id === templateId; });
+    if (!tmpl) return;
+    selectedPipeline = tmpl.steps;
+    var display = document.getElementById('pipeline-chain-display');
+    display.style.display = '';
+    document.getElementById('pipeline-chain-text').textContent = tmpl.name + ': ' + tmpl.steps.join(' \\u2192 ');
+  } catch(e) {}
+}
+
+function clearPipelineSelection() {
+  selectedPipeline = null;
+  document.getElementById('pipeline-chain-display').style.display = 'none';
 }
 
 function closeMissionModal() {
@@ -1825,6 +1871,8 @@ function closeMissionModal() {
   document.getElementById('mission-prompt').value = '';
   document.getElementById('mission-priority').value = '5';
   document.getElementById('mission-error').style.display = 'none';
+  selectedPipeline = null;
+  document.getElementById('pipeline-chain-display').style.display = 'none';
 }
 document.getElementById('mission-overlay').addEventListener('click', closeMissionModal);
 
@@ -1837,11 +1885,18 @@ async function createMissionTask() {
   if (!title) { errEl.textContent = 'Title is required'; errEl.style.display = ''; return; }
   if (!prompt) { errEl.textContent = 'Prompt is required'; errEl.style.display = ''; return; }
 
+  var body = { title: title, prompt: prompt, priority: priority, status: 'backlog' };
+  if (selectedPipeline && selectedPipeline.length > 0) {
+    body.handoff_chain = selectedPipeline;
+    body.assigned_agent = selectedPipeline[0];
+    body.status = 'todo';
+  }
+
   try {
     const res = await fetch(BASE + '/api/mission/tasks?token=' + TOKEN, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title, prompt: prompt, priority: priority }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const data = await res.json();
@@ -1855,6 +1910,21 @@ async function createMissionTask() {
     errEl.textContent = 'Network error';
     errEl.style.display = '';
   }
+}
+
+// Pipeline controls on kanban cards
+async function resumePipeline(issueId) {
+  try {
+    await fetch(BASE + '/api/mission/tasks/' + issueId + '/resume-pipeline?token=' + TOKEN, { method: 'POST' });
+    await loadKanban();
+  } catch(e) { console.error('Resume error:', e); }
+}
+
+async function skipPipelineStep(issueId) {
+  try {
+    await fetch(BASE + '/api/mission/tasks/' + issueId + '/skip-step?token=' + TOKEN, { method: 'POST' });
+    await loadKanban();
+  } catch(e) { console.error('Skip error:', e); }
 }
 
 // ── Task History Drawer ──────────────────────────────────────────────
@@ -2037,6 +2107,18 @@ function renderKanbanCard(t) {
   var agentLabel = t.assigned_agent ? '<span style="color:' + agentColor + ';font-size:10px">@' + t.assigned_agent + '</span>' : '<span style="color:#555;font-size:10px">unassigned</span>';
   var timeAgo = elapsed(t.created_at);
 
+  var pipelineHtml = '';
+  if (t.handoff_chain) {
+    var chain = JSON.parse(t.handoff_chain);
+    var stepLabel = (t.current_step + 1) + '/' + chain.length;
+    var isPaused = t.pipeline_status === 'paused';
+    pipelineHtml = '<div class="flex items-center gap-1 mt-1">' +
+      '<span style="font-size:10px;color:' + (isPaused ? '#f87171' : '#60a5fa') + '">' + (isPaused ? '\u23F8 paused' : '\u2B95') + ' ' + stepLabel + '</span>' +
+      (isPaused ? '<button onclick="event.stopPropagation();resumePipeline(\\'' + t.id + '\\')" style="background:#1e3a5f;color:#60a5fa;border:none;border-radius:4px;padding:1px 6px;font-size:9px;cursor:pointer;margin-left:4px">\u25B6 Resume</button>' +
+        '<button onclick="event.stopPropagation();skipPipelineStep(\\'' + t.id + '\\')" style="background:#422006;color:#fbbf24;border:none;border-radius:4px;padding:1px 6px;font-size:9px;cursor:pointer">\u23ED Skip</button>' : '') +
+    '</div>';
+  }
+
   return '<div class="kanban-card" data-kid="' + t.id + '" draggable="true" ondragstart="kanbanDragStart(event)" ondragend="kanbanDragEnd(event)">' +
     '<div class="flex items-center justify-between mb-1">' +
       '<span class="text-xs font-semibold text-white" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(t.title) + '</span>' +
@@ -2047,8 +2129,8 @@ function renderKanbanCard(t) {
     '</div>' +
     '<div class="flex items-center justify-between mt-1">' +
       '<span class="text-xs text-gray-600">' + timeAgo + '</span>' +
-      (t.handoff_chain ? '<span style="font-size:10px;color:#60a5fa" title="Pipeline">\u2B95 ' + (t.current_step + 1) + '/' + JSON.parse(t.handoff_chain).length + '</span>' : '') +
     '</div>' +
+    pipelineHtml +
   '</div>';
 }
 

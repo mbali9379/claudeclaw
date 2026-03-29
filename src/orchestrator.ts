@@ -5,7 +5,8 @@ import path from 'path';
 import { runAgent, UsageInfo } from './agent.js';
 import { loadAgentConfig, listAgentIds, resolveAgentClaudeMd } from './agent-config.js';
 import { PROJECT_ROOT } from './config.js';
-import { logToHiveMind, createInterAgentTask, completeInterAgentTask, updateIssueCost } from './db.js';
+import { logToHiveMind, createInterAgentTask, completeInterAgentTask, updateIssueCost, getMissionTask, updateIssueStatus } from './db.js';
+import type { MissionTask } from './db.js';
 import { logger } from './logger.js';
 import { buildMemoryContext } from './memory.js';
 
@@ -233,4 +234,62 @@ export async function delegateToAgent(
     );
     throw err;
   }
+}
+
+// ── Pipeline Handoff ────────────────────────────────────────────────
+
+/**
+ * Check if a completed mission task is part of a pipeline and advance it.
+ * Returns true if a handoff was triggered, false if no pipeline or pipeline complete.
+ *
+ * Call this after a mission task completes successfully.
+ */
+export async function tryPipelineHandoff(
+  issueId: string,
+  result: string,
+  chatId: string,
+  onNotify?: (msg: string) => Promise<void>,
+): Promise<boolean> {
+  const { advancePipelineStep, pausePipeline } = await import('./db.js');
+
+  const task = getMissionTask(issueId);
+  if (!task?.handoff_chain) return false;
+
+  const chain: string[] = JSON.parse(task.handoff_chain);
+  const nextStep = task.current_step + 1;
+
+  // Pipeline complete
+  if (nextStep >= chain.length) {
+    advancePipelineStep(issueId, '');
+    logToHiveMind('system', chatId, 'pipeline_complete', `Pipeline done: "${task.title}" (${chain.length} steps)`);
+    await onNotify?.(`Pipeline complete: "${task.title}"`);
+    return false;
+  }
+
+  const nextAgentId = chain[nextStep];
+
+  // Validate next agent exists
+  if (!agentRegistry.some((a) => a.id === nextAgentId) && nextAgentId !== 'main') {
+    pausePipeline(issueId, `Next agent "${nextAgentId}" not found`);
+    await onNotify?.(`Pipeline paused: "${task.title}" -- agent "${nextAgentId}" not found`);
+    return false;
+  }
+
+  // Advance the step
+  advancePipelineStep(issueId, nextAgentId);
+  logToHiveMind('system', chatId, 'pipeline_handoff', `Step ${nextStep + 1}/${chain.length}: handing "${task.title}" to ${nextAgentId}`);
+
+  // Build prompt for next agent with previous result as context
+  const handoffPrompt = `[Pipeline step ${nextStep + 1}/${chain.length} for issue: ${task.title}]\n\nPrevious step output:\n${result.slice(0, 3000)}\n\nOriginal task:\n${task.prompt}`;
+
+  try {
+    await delegateToAgent(nextAgentId, handoffPrompt, chatId, 'pipeline');
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    pausePipeline(issueId, errMsg.slice(0, 500));
+    logToHiveMind('system', chatId, 'pipeline_error', `Pipeline paused: "${task.title}" at step ${nextStep + 1} -- ${errMsg.slice(0, 100)}`);
+    await onNotify?.(`Pipeline paused: "${task.title}" at step ${nextStep + 1}/${chain.length} -- ${errMsg.slice(0, 100)}`);
+  }
+
+  return true;
 }

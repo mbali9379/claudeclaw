@@ -12,12 +12,15 @@ import {
   completeMissionTask,
   resetStuckMissionTasks,
   updateIssueCost,
+  getMissionTask,
+  pausePipeline,
 } from './db.js';
 import { logger } from './logger.js';
 import { ingestConversationTurn } from './memory-ingest.js';
 import { messageQueue } from './message-queue.js';
 import { runAgent } from './agent.js';
 import { formatForTelegram, splitMessage } from './bot.js';
+import { tryPipelineHandoff } from './orchestrator.js';
 import { emitChatEvent } from './state.js';
 
 type Sender = (text: string) => Promise<void>;
@@ -188,6 +191,21 @@ async function runDueMissionTasks(): Promise<void> {
 
         logger.info({ missionId: mission.id }, 'Mission task completed');
 
+        // Check for pipeline handoff
+        const handedOff = await tryPipelineHandoff(mission.id, text, chatId, async (msg) => {
+          try { await sender(msg); } catch {}
+        });
+        if (handedOff) {
+          // Pipeline continues -- don't send full result to Telegram, just a status update
+          try { await sender('Pipeline step done for "' + mission.title + '" -- handing off to next agent'); } catch {}
+          emitChatEvent({
+            type: 'mission_update' as 'progress',
+            chatId,
+            content: JSON.stringify({ id: mission.id, status: 'pipeline_handoff', title: mission.title }),
+          });
+          return;
+        }
+
         // Send result to Telegram
         for (const chunk of splitMessage(formatForTelegram(text))) {
           await sender(chunk);
@@ -224,7 +242,14 @@ async function runDueMissionTasks(): Promise<void> {
     } catch (err) {
       clearTimeout(timeout);
       const errMsg = err instanceof Error ? err.message : String(err);
-      completeMissionTask(mission.id, null, 'failed', errMsg.slice(0, 500));
+      // If this is a pipeline task, pause the pipeline instead of just failing
+      const currentTask = getMissionTask(mission.id);
+      if (currentTask?.handoff_chain) {
+        pausePipeline(mission.id, errMsg.slice(0, 500));
+        try { await sender('Pipeline paused: "' + mission.title + '" failed -- ' + errMsg.slice(0, 100)); } catch {}
+      } else {
+        completeMissionTask(mission.id, null, 'failed', errMsg.slice(0, 500));
+      }
       logger.error({ err, missionId: mission.id }, 'Mission task failed');
     } finally {
       runningTaskIds.delete(missionKey);

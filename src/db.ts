@@ -1878,6 +1878,33 @@ export function getIssuesByStatus(): Record<string, MissionTask[]> {
   return grouped;
 }
 
+/** Advance pipeline to next step. Returns the updated task, or null if not a pipeline issue. */
+export function advancePipelineStep(id: string, nextAgent: string): MissionTask | null {
+  const task = getMissionTask(id);
+  if (!task || !task.handoff_chain) return null;
+  const chain: string[] = JSON.parse(task.handoff_chain);
+  const nextStep = task.current_step + 1;
+  if (nextStep >= chain.length) {
+    // Pipeline complete
+    db.prepare(
+      `UPDATE mission_tasks SET current_step = ?, pipeline_status = 'completed', status = 'done', completed_at = ? WHERE id = ?`,
+    ).run(nextStep, Math.floor(Date.now() / 1000), id);
+    return getMissionTask(id);
+  }
+  // Advance to next agent
+  db.prepare(
+    `UPDATE mission_tasks SET current_step = ?, assigned_agent = ?, status = 'in_progress', pipeline_status = 'running' WHERE id = ?`,
+  ).run(nextStep, nextAgent, id);
+  return getMissionTask(id);
+}
+
+/** Pause pipeline on failure. */
+export function pausePipeline(id: string, error: string): void {
+  db.prepare(
+    `UPDATE mission_tasks SET pipeline_status = 'paused', status = 'blocked', error = ? WHERE id = ?`,
+  ).run(error, id);
+}
+
 export function getUnassignedMissionTasks(): MissionTask[] {
   return db
     .prepare(
