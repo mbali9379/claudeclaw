@@ -2194,36 +2194,7 @@ function filterByAgent(agentId) {
   loadTasks();
   loadSummary();
 
-  // Update chat to show target agent
-  var chatInput = document.getElementById('chat-input');
-  var chatTitle = document.querySelector('.chat-header-title');
-  var delegationNote = agentId && agentId !== 'main' ? ' (via main)' : '';
-  if (chatInput) {
-    chatInput.setAttribute('placeholder', agentId && agentId !== 'main'
-      ? 'Message @' + agentId + delegationNote + '...'
-      : 'Send a message...');
-  }
-  if (chatTitle) {
-    var agentCol = AGENT_COLORS[agentId] || '#6b7280';
-    chatTitle.innerHTML = agentId && agentId !== 'main'
-      ? 'Chat <span style="color:' + agentCol + ';font-size:12px">@' + escapeHtml(agentId) + '</span><span style="font-size:9px;color:#666;margin-left:4px">via main</span>'
-      : 'Chat';
-  }
-
-  // Sync chat agent tab
-  var tabAgent = agentId || 'all';
-  if (activeAgentTab !== tabAgent) {
-    activeAgentTab = tabAgent;
-    document.querySelectorAll('.chat-agent-tab').forEach(function(t) { t.classList.remove('active'); });
-    document.querySelectorAll('.chat-agent-tab').forEach(function(t) {
-      if (t.textContent.toLowerCase().replace(/^./, '') === agentId || (tabAgent === 'all' && t.textContent === 'All')) {
-        t.classList.add('active');
-      }
-    });
-    chatHistoryLoaded = false;
-    loadChatHistory();
-    loadSessionInfo();
-  }
+  // Chat always talks to main -- don't change routing based on rail filter
 }
 
 // ── Issue Kanban Board ──────────────────────────────────────────────
@@ -2575,44 +2546,33 @@ function updateFabBadge() {
   }
 }
 
-// Agent Tabs
+// Agent Tabs - show main bot tab + info about direct Telegram access
 async function loadAgentTabs() {
   try {
     const data = await api('/api/agents');
     chatAgents = data.agents || [];
     const container = document.getElementById('chat-agent-tabs');
-    container.innerHTML = '';
-    const allTab = document.createElement('button');
-    allTab.className = 'chat-agent-tab' + (activeAgentTab === 'all' ? ' active' : '');
-    allTab.textContent = 'All';
-    allTab.onclick = function() { switchAgentTab('all', this); };
-    container.appendChild(allTab);
-    chatAgents.forEach(function(a) {
-      const tab = document.createElement('button');
-      tab.className = 'chat-agent-tab' + (activeAgentTab === a.id ? ' active' : '');
-      const dot = document.createElement('span');
-      dot.className = 'agent-dot ' + (a.running ? 'live' : 'dead');
-      tab.appendChild(dot);
-      tab.appendChild(document.createTextNode(a.id.charAt(0).toUpperCase() + a.id.slice(1)));
-      tab.onclick = function() { switchAgentTab(a.id, this); };
-      container.appendChild(tab);
-    });
+    var runningAgents = chatAgents.filter(function(a) { return a.running && a.id !== 'main'; });
+    if (runningAgents.length > 0) {
+      container.innerHTML = '<div style="display:flex;align-items:center;gap:6px;padding:6px 0;font-size:11px;color:var(--text-faint);width:100%">' +
+        '<span>This chat talks to main.</span>' +
+        '<span style="color:var(--text-dim)">For direct agent chat, use Telegram:</span>' +
+        runningAgents.map(function(a) {
+          var color = AGENT_COLORS[a.id] || '#6b7280';
+          return '<span style="color:' + color + ';font-weight:600">' + a.name + '</span>';
+        }).join('<span style="color:var(--text-dim)">&middot;</span>') +
+      '</div>';
+    } else {
+      container.innerHTML = '';
+    }
   } catch(e) { console.error('Agent tabs error', e); }
 }
 
 function switchAgentTab(agentId, el) {
   activeAgentTab = agentId;
-  document.querySelectorAll('.chat-agent-tab').forEach(function(t) { t.classList.remove('active'); });
-  if (el) el.classList.add('active');
   chatHistoryLoaded = false;
   loadChatHistory();
   loadSessionInfo();
-
-  // Sync with rail filter so chat routing matches the tab
-  var mappedAgent = agentId === 'all' ? null : agentId;
-  if (railFilterAgent !== mappedAgent) {
-    filterByAgent(mappedAgent);
-  }
 }
 
 // Session Info
@@ -2853,9 +2813,6 @@ async function sendChatMessage() {
   document.getElementById('chat-send-btn').disabled = true;
   try {
     var chatBody = { message: text };
-    if (railFilterAgent && railFilterAgent !== 'main') {
-      chatBody.agent = railFilterAgent;
-    }
     await fetch(BASE + '/api/chat/send?token=' + TOKEN, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
