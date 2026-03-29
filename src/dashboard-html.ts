@@ -862,11 +862,17 @@ async function loadTasks() {
   try {
     const data = await api('/api/tasks');
     const c = document.getElementById('tasks-container');
-    if (!data.tasks || data.tasks.length === 0) {
-      c.innerHTML = '<div class="card text-gray-500 text-sm">No scheduled tasks</div>';
+    var filteredTasks = data.tasks || [];
+    if (railFilterAgent) {
+      filteredTasks = filteredTasks.filter(function(t) {
+        return (t.agent_id || 'main') === railFilterAgent;
+      });
+    }
+    if (filteredTasks.length === 0) {
+      c.innerHTML = '<div class="card text-gray-500 text-sm">No scheduled tasks' + (railFilterAgent ? ' for ' + railFilterAgent : '') + '</div>';
       return;
     }
-    c.innerHTML = data.tasks.map(t => {
+    c.innerHTML = filteredTasks.map(t => {
       const statusCls = t.status === 'running' ? 'pill-running' : t.status === 'active' ? 'pill-active' : 'pill-paused';
       const agentBadge = t.agent_id && t.agent_id !== 'main' ? '<span class="text-xs text-gray-500 ml-2">[' + t.agent_id + ']</span>' : '';
       const lastStatusIcon = t.last_status === 'success' ? '<span class="last-success" title="Last run succeeded">&#10003;</span> ' : t.last_status === 'failed' ? '<span class="last-failed" title="Last run failed">&#10007;</span> ' : t.last_status === 'timeout' ? '<span class="last-timeout" title="Last run timed out">&#9200;</span> ' : '';
@@ -1590,7 +1596,9 @@ function copyToClipboard(text) {
 
 async function loadHiveMind() {
   try {
-    const data = await api('/api/hive-mind?limit=15');
+    var hiveUrl = '/api/hive-mind?limit=15';
+    if (railFilterAgent) hiveUrl += '&agent=' + railFilterAgent;
+    const data = await api(hiveUrl);
     const section = document.getElementById('hive-section');
     const container = document.getElementById('hive-container');
     if (!data.entries || data.entries.length === 0) { section.style.display = 'none'; return; }
@@ -1663,12 +1671,31 @@ async function loadSummary() {
     ]);
     const bar = document.getElementById('summary-bar');
     bar.style.display = '';
-    document.getElementById('sum-messages').textContent = tokens.stats.todayTurns || '0';
-    const activeCount = agents.agents ? agents.agents.filter(a => a.running).length : 0;
-    document.getElementById('sum-agents').textContent = activeCount + '/' + (agents.agents ? agents.agents.length : 0);
-    var totalTokens = (tokens.stats.todayInput || 0) + (tokens.stats.todayOutput || 0);
-    document.getElementById('sum-cost').textContent = totalTokens > 1000 ? Math.round(totalTokens / 1000) + 'k' : totalTokens.toString();
-    document.getElementById('sum-memories').textContent = mems.stats.total || '0';
+
+    if (railFilterAgent) {
+      // Show agent-specific stats
+      var agentData = agents.agents ? agents.agents.find(function(a) { return a.id === railFilterAgent; }) : null;
+      var agentColor = AGENT_COLORS[railFilterAgent] || '#6b7280';
+      document.getElementById('sum-messages').textContent = agentData ? agentData.todayTurns : '0';
+      document.getElementById('sum-messages').parentElement.querySelector('.summary-stat-label').innerHTML = '<span style="color:' + agentColor + '">' + railFilterAgent + '</span> turns';
+      document.getElementById('sum-agents').textContent = agentData && agentData.running ? 'live' : 'off';
+      document.getElementById('sum-agents').parentElement.querySelector('.summary-stat-label').textContent = 'Status';
+      var agentCost = agentData ? (agentData.todayCost * 0.92).toFixed(2) : '0.00';
+      document.getElementById('sum-cost').textContent = '\u20AC' + agentCost;
+      document.getElementById('sum-cost').parentElement.querySelector('.summary-stat-label').textContent = 'Cost Today';
+      document.getElementById('sum-memories').textContent = mems.stats.total || '0';
+    } else {
+      // Default: all agents
+      document.getElementById('sum-messages').textContent = tokens.stats.todayTurns || '0';
+      document.getElementById('sum-messages').parentElement.querySelector('.summary-stat-label').textContent = 'Messages';
+      const activeCount = agents.agents ? agents.agents.filter(a => a.running).length : 0;
+      document.getElementById('sum-agents').textContent = activeCount + '/' + (agents.agents ? agents.agents.length : 0);
+      document.getElementById('sum-agents').parentElement.querySelector('.summary-stat-label').textContent = 'Agents';
+      var totalTokens = (tokens.stats.todayInput || 0) + (tokens.stats.todayOutput || 0);
+      document.getElementById('sum-cost').textContent = totalTokens > 1000 ? Math.round(totalTokens / 1000) + 'k' : totalTokens.toString();
+      document.getElementById('sum-cost').parentElement.querySelector('.summary-stat-label').textContent = 'Tokens Today';
+      document.getElementById('sum-memories').textContent = mems.stats.total || '0';
+    }
   } catch {}
 }
 
@@ -1685,12 +1712,15 @@ async function loadMissionControl() {
     const tasks = taskData.tasks || [];
     missionAgentsList = agentData.agents || [];
 
+    // Apply agent filter
+    var filteredMissionTasks = railFilterAgent ? tasks.filter(function(t) { return t.assigned_agent === railFilterAgent || (!t.assigned_agent && !railFilterAgent); }) : tasks;
+
     // Split: unassigned go to inbox, assigned go to agent columns
-    const unassigned = tasks.filter(t => !t.assigned_agent && t.status === 'queued');
+    const unassigned = filteredMissionTasks.filter(t => !t.assigned_agent && t.status === 'queued');
     // Only show completed tasks for 30 minutes, then they move to history only
     const now = Math.floor(Date.now() / 1000);
     const DONE_VISIBLE_SECS = 30 * 60;
-    const assigned = tasks.filter(t => {
+    const assigned = filteredMissionTasks.filter(t => {
       if (!t.assigned_agent) return false;
       if (t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled') {
         return t.completed_at && (now - t.completed_at) < DONE_VISIBLE_SECS;
@@ -2160,6 +2190,9 @@ function filterByAgent(agentId) {
   loadAgentRail();
   loadKanban();
   loadMissionControl();
+  loadHiveMind();
+  loadTasks();
+  loadSummary();
 }
 
 // ── Issue Kanban Board ──────────────────────────────────────────────
