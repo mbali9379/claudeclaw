@@ -40,7 +40,11 @@ import {
   getAuditLog,
   getAuditLogCount,
   getRecentBlockedActions,
+  updateIssueStatus,
+  updateIssueFields,
+  getIssuesByStatus,
 } from './db.js';
+import type { IssueStatus } from './db.js';
 import { generateContent, parseJsonResponse } from './gemini.js';
 import { getSecurityStatus } from './security.js';
 import { listAgentIds, loadAgentConfig, setAgentModel } from './agent-config.js';
@@ -179,6 +183,10 @@ export function startDashboard(botApi?: Api<RawApi>): void {
       prompt?: string;
       assigned_agent?: string;
       priority?: number;
+      status?: IssueStatus;
+      acceptance_criteria?: string;
+      handoff_chain?: string[];
+      max_cost?: number;
     }>();
 
     const title = body?.title?.trim();
@@ -198,7 +206,12 @@ export function startDashboard(botApi?: Api<RawApi>): void {
     }
 
     const id = crypto.randomBytes(4).toString('hex');
-    createMissionTask(id, title, prompt, assignedAgent, 'dashboard', priority);
+    createMissionTask(id, title, prompt, assignedAgent, 'dashboard', priority, {
+      status: body?.status,
+      acceptance_criteria: body?.acceptance_criteria?.trim(),
+      handoff_chain: body?.handoff_chain,
+      max_cost: body?.max_cost,
+    });
 
     const task = getMissionTask(id);
     return c.json({ task }, 201);
@@ -241,19 +254,63 @@ export function startDashboard(botApi?: Api<RawApi>): void {
 
   app.patch('/api/mission/tasks/:id', async (c) => {
     const id = c.req.param('id');
-    const body = await c.req.json<{ assigned_agent?: string }>();
-    const newAgent = body?.assigned_agent?.trim();
-    if (!newAgent) return c.json({ error: 'assigned_agent required' }, 400);
-    const validAgents = ['main', ...listAgentIds()];
-    if (!validAgents.includes(newAgent)) return c.json({ error: 'Unknown agent' }, 400);
-    const ok = reassignMissionTask(id, newAgent);
-    return c.json({ ok });
+    const task = getMissionTask(id);
+    if (!task) return c.json({ error: 'Not found' }, 404);
+
+    const body = await c.req.json<{
+      status?: IssueStatus;
+      assigned_agent?: string;
+      title?: string;
+      prompt?: string;
+      acceptance_criteria?: string;
+      priority?: number;
+    }>();
+
+    const validStatuses: IssueStatus[] = [
+      'backlog', 'todo', 'in_progress', 'in_review', 'done',
+      'blocked', 'cancelled', 'queued', 'running', 'completed', 'failed',
+    ];
+
+    // Status update
+    if (body?.status) {
+      if (!validStatuses.includes(body.status)) {
+        return c.json({ error: `Invalid status. Valid: ${validStatuses.join(', ')}` }, 400);
+      }
+      updateIssueStatus(id, body.status);
+    }
+
+    // Agent reassignment
+    if (body?.assigned_agent !== undefined) {
+      const newAgent = body.assigned_agent.trim() || null;
+      if (newAgent) {
+        const validAgents = ['main', ...listAgentIds()];
+        if (!validAgents.includes(newAgent)) return c.json({ error: 'Unknown agent' }, 400);
+      }
+      updateIssueFields(id, { assigned_agent: newAgent });
+    }
+
+    // Field updates
+    const fields: Parameters<typeof updateIssueFields>[1] = {};
+    if (body?.title !== undefined) fields.title = body.title.trim();
+    if (body?.prompt !== undefined) fields.prompt = body.prompt.trim();
+    if (body?.acceptance_criteria !== undefined) fields.acceptance_criteria = body.acceptance_criteria.trim();
+    if (body?.priority !== undefined) fields.priority = Math.max(0, Math.min(10, body.priority));
+    if (Object.keys(fields).length > 0) updateIssueFields(id, fields);
+
+    const updated = getMissionTask(id);
+    return c.json({ task: updated });
   });
 
   app.delete('/api/mission/tasks/:id', (c) => {
     const id = c.req.param('id');
     const ok = deleteMissionTask(id);
     return c.json({ ok });
+  });
+
+  // Kanban view: issues grouped by status
+  app.get('/api/mission/kanban', (c) => {
+    const grouped = getIssuesByStatus();
+    return c.json({ columns: grouped });
   });
 
   app.get('/api/mission/history', (c) => {

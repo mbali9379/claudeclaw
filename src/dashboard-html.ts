@@ -68,6 +68,28 @@ export function getDashboardHtml(token: string, chatId: string): string {
   .device-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px; }
   .device-mobile { background: #1e3a5f; color: #60a5fa; }
   .device-desktop { background: #3b1f5e; color: #c084fc; }
+  /* Agent Rail */
+  .agent-rail { position: fixed; left: 0; top: 0; bottom: 0; width: 72px; background: #0a0a0a; border-right: 1px solid #1e1e1e; display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 4px; z-index: 30; overflow-y: auto; }
+  .agent-rail-btn { width: 48px; height: 48px; border-radius: 12px; border: 2px solid transparent; background: #1a1a1a; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; transition: border-color 0.15s, background 0.15s; position: relative; }
+  .agent-rail-btn:hover { background: #222; }
+  .agent-rail-btn.active { border-color: #4f46e5; background: #1a1a2e; }
+  .agent-rail-btn .rail-dot { position: absolute; top: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; }
+  .agent-rail-btn .rail-label { font-size: 9px; color: #888; margin-top: 2px; max-width: 44px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+  .agent-rail-btn .rail-icon { font-size: 18px; font-weight: 700; line-height: 1; }
+  @media (max-width: 1023px) { .agent-rail { display: none; } }
+  @media (min-width: 1024px) { body { padding-left: 72px; } }
+  /* Kanban Board */
+  .kanban-board { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; }
+  .kanban-col { min-width: 200px; flex: 1; max-width: 280px; }
+  .kanban-col-header { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 10px; border-radius: 8px 8px 0 0; display: flex; align-items: center; justify-content: space-between; }
+  .kanban-col-body { background: #141414; border: 1px solid #2a2a2a; border-radius: 0 0 10px 10px; padding: 8px; min-height: 100px; transition: border-color 0.2s, background 0.2s; }
+  .kanban-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; margin-bottom: 8px; cursor: grab; transition: opacity 0.15s, border-color 0.15s; }
+  .kanban-card:hover { border-color: #3a3a3a; }
+  .kanban-card.dragging { opacity: 0.4; }
+  .kanban-col-body.drag-over { border-color: #4f46e5; background: #1a1a2e; }
+  .cost-tier-green { color: #6ee7b7; }
+  .cost-tier-amber { color: #fbbf24; }
+  .cost-tier-red { color: #f87171; }
   /* Drawer */
   .drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 40; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
   .drawer-overlay.open { opacity: 1; pointer-events: auto; }
@@ -150,6 +172,9 @@ export function getDashboardHtml(token: string, chatId: string): string {
 </head>
 <body class="p-4 select-none">
 
+<!-- Agent Rail (desktop only) -->
+<nav id="agent-rail" class="agent-rail"></nav>
+
 <!-- Outer wrapper: single column on mobile, wide 2-col on desktop -->
 <div class="max-w-lg lg:max-w-6xl mx-auto">
 
@@ -229,11 +254,22 @@ export function getDashboardHtml(token: string, chatId: string): string {
   <div id="tasks-inbox" class="flex flex-wrap gap-3"></div>
 </div>
 
-<!-- Mission Control -->
+<!-- Issue Kanban -->
+<div id="kanban-section" class="mb-5" style="display:none">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Issues</h2>
+    <div class="flex items-center gap-2">
+      <button onclick="openMissionModal()" style="background:#4f46e5;color:#fff;border:none;border-radius:8px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer">+ New Issue</button>
+      <button onclick="openTaskHistory()" style="background:none;border:none;color:#6b7280;font-size:12px;cursor:pointer">History &rarr;</button>
+    </div>
+  </div>
+  <div id="kanban-board" class="kanban-board"></div>
+</div>
+
+<!-- Legacy Mission Control (agent columns) -->
 <div id="mission-section" class="mb-5" style="display:none">
   <div class="flex items-center justify-between mb-2">
-    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Mission Control</h2>
-    <button onclick="openTaskHistory()" style="background:none;border:none;color:#6b7280;font-size:12px;cursor:pointer">History &rarr;</button>
+    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Agent Tasks</h2>
   </div>
   <div id="mission-board" class="flex gap-3 overflow-x-auto pb-2" style="scroll-snap-type: x mandatory;">
   </div>
@@ -363,7 +399,7 @@ export function getDashboardHtml(token: string, chatId: string): string {
         <div id="caw-activate-status" class="text-xs text-center mt-2" style="min-height:16px"></div>
       </div>
 
-      <button onclick="closeCreateAgentWizard();loadAgents();loadMissionControl();" style="width:100%;background:#1a1a1a;color:#9ca3af;border:1px solid #2a2a2a;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;margin-top:8px">Done</button>
+      <button onclick="closeCreateAgentWizard();loadAgents();loadMissionControl();loadKanban();loadAgentRail();" style="width:100%;background:#1a1a1a;color:#9ca3af;border:1px solid #2a2a2a;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;margin-top:8px">Done</button>
     </div>
   </div>
 </div>
@@ -1681,7 +1717,7 @@ async function missionAction(id, action) {
     } else if (action === 'delete') {
       await fetch(BASE + '/api/mission/tasks/' + id + '?token=' + TOKEN, { method: 'DELETE' });
     }
-    await loadMissionControl();
+    await loadMissionControl(); await loadKanban();
   } catch(e) { console.error('Mission action failed:', e); }
 }
 
@@ -1737,7 +1773,7 @@ async function missionDrop(e) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ assigned_agent: newAgent }),
     });
-    await loadMissionControl();
+    await loadMissionControl(); await loadKanban();
   } catch(err) { console.error('Reassign failed:', err); }
   missionDragId = null;
 }
@@ -1747,7 +1783,7 @@ async function autoAssignOne(id) {
     const res = await fetch(BASE + '/api/mission/tasks/' + id + '/auto-assign?token=' + TOKEN, { method: 'POST' });
     const data = await res.json();
     if (data.ok) {
-      await loadMissionControl();
+      await loadMissionControl(); await loadKanban();
     } else {
       console.error('Auto-assign failed:', data.error);
     }
@@ -1761,7 +1797,7 @@ async function autoAssignAll() {
   try {
     const res = await fetch(BASE + '/api/mission/tasks/auto-assign-all?token=' + TOKEN, { method: 'POST' });
     const data = await res.json();
-    await loadMissionControl();
+    await loadMissionControl(); await loadKanban();
   } catch(e) { console.error('Auto-assign all error:', e); }
   btn.textContent = 'Auto-assign All';
   btn.disabled = false;
@@ -1814,7 +1850,7 @@ async function createMissionTask() {
       return;
     }
     closeMissionModal();
-    await loadMissionControl();
+    await loadMissionControl(); await loadKanban();
   } catch(e) {
     errEl.textContent = 'Network error';
     errEl.style.display = '';
@@ -1888,11 +1924,176 @@ function closeTaskHistory() {
 
 // Poll mission tasks more frequently (every 15s) for responsiveness
 setInterval(loadMissionControl, 15000);
+setInterval(loadKanban, 15000);
+
+// ── Agent Rail ──────────────────────────────────────────────────────
+let railFilterAgent = null;
+
+async function loadAgentRail() {
+  try {
+    const data = await api('/api/agents');
+    const rail = document.getElementById('agent-rail');
+    if (!rail || !data.agents) return;
+    const agents = data.agents || [];
+
+    let html = '<div class="agent-rail-btn' + (!railFilterAgent ? ' active' : '') + '" onclick="filterByAgent(null)" title="All agents">' +
+      '<span class="rail-icon" style="color:#fff">*</span>' +
+      '<span class="rail-label">All</span></div>';
+
+    agents.forEach(function(a) {
+      var color = AGENT_COLORS[a.id] || '#6b7280';
+      var dotColor = a.running ? '#22c55e' : '#555';
+      var initial = (a.name || a.id).charAt(0).toUpperCase();
+      var isActive = railFilterAgent === a.id;
+      html += '<div class="agent-rail-btn' + (isActive ? ' active' : '') + '" onclick="filterByAgent(\\''+a.id+'\\')" title="' + escapeHtml(a.name) + '">' +
+        '<span class="rail-dot" style="background:' + dotColor + '"></span>' +
+        '<span class="rail-icon" style="color:' + color + '">' + initial + '</span>' +
+        '<span class="rail-label">' + escapeHtml(a.name || a.id) + '</span>' +
+      '</div>';
+    });
+
+    rail.innerHTML = html;
+  } catch(e) { console.error('Rail load error:', e); }
+}
+
+function filterByAgent(agentId) {
+  railFilterAgent = agentId;
+  loadAgentRail();
+  loadKanban();
+  loadMissionControl();
+}
+
+// ── Issue Kanban Board ──────────────────────────────────────────────
+const KANBAN_COLUMNS = [
+  { id: 'backlog', label: 'Backlog', color: '#6b7280', bg: '#1f2937' },
+  { id: 'todo', label: 'To Do', color: '#a78bfa', bg: '#1e1b4b' },
+  { id: 'in_progress', label: 'In Progress', color: '#60a5fa', bg: '#1e3a5f' },
+  { id: 'in_review', label: 'In Review', color: '#fbbf24', bg: '#422006' },
+  { id: 'done', label: 'Done', color: '#6ee7b7', bg: '#064e3b' },
+];
+
+// Map legacy statuses to kanban columns
+function mapStatusToKanban(status) {
+  var map = { queued: 'todo', running: 'in_progress', completed: 'done', failed: 'done', cancelled: 'done', blocked: 'backlog' };
+  return map[status] || status;
+}
+
+function costTierClass(model) {
+  if (!model) return 'cost-tier-green';
+  if (model.includes('opus')) return 'cost-tier-red';
+  if (model.includes('sonnet')) return 'cost-tier-amber';
+  return 'cost-tier-green';
+}
+
+async function loadKanban() {
+  try {
+    var data = await api('/api/mission/kanban');
+    var section = document.getElementById('kanban-section');
+    var board = document.getElementById('kanban-board');
+    if (!section || !board) return;
+    section.style.display = '';
+
+    // Flatten all tasks from grouped data
+    var allTasks = [];
+    Object.keys(data.columns || {}).forEach(function(status) {
+      (data.columns[status] || []).forEach(function(t) { allTasks.push(t); });
+    });
+
+    // Filter by agent if rail filter is active
+    if (railFilterAgent) {
+      allTasks = allTasks.filter(function(t) { return t.assigned_agent === railFilterAgent; });
+    }
+
+    // Group by kanban column
+    var grouped = {};
+    KANBAN_COLUMNS.forEach(function(col) { grouped[col.id] = []; });
+    allTasks.forEach(function(t) {
+      var col = mapStatusToKanban(t.status);
+      if (grouped[col]) grouped[col].push(t);
+    });
+
+    var html = '';
+    KANBAN_COLUMNS.forEach(function(col) {
+      var tasks = grouped[col.id] || [];
+      var count = tasks.length;
+      html += '<div class="kanban-col">' +
+        '<div class="kanban-col-header" style="background:' + col.bg + ';color:' + col.color + '">' +
+          col.label + '<span style="font-size:10px;opacity:0.7;margin-left:6px">' + count + '</span>' +
+        '</div>' +
+        '<div class="kanban-col-body" data-kanban-status="' + col.id + '" ondragover="kanbanDragOver(event)" ondragleave="kanbanDragLeave(event)" ondrop="kanbanDrop(event)">' +
+          (tasks.length ? tasks.map(renderKanbanCard).join('') : '<div class="text-xs text-gray-600 text-center py-6">No issues</div>') +
+        '</div></div>';
+    });
+
+    board.innerHTML = html;
+  } catch(e) { console.error('Kanban load error:', e); }
+}
+
+function renderKanbanCard(t) {
+  var agentColor = AGENT_COLORS[t.assigned_agent] || '#6b7280';
+  var priorityDot = t.priority >= 8 ? '#ef4444' : t.priority >= 4 ? '#fbbf24' : '#6b7280';
+  var tierClass = costTierClass(t.model_used);
+  var costLabel = t.cost_eur > 0 ? '<span class="' + tierClass + '" style="font-size:10px">\u20AC' + t.cost_eur.toFixed(3) + '</span>' : '';
+  var agentLabel = t.assigned_agent ? '<span style="color:' + agentColor + ';font-size:10px">@' + t.assigned_agent + '</span>' : '<span style="color:#555;font-size:10px">unassigned</span>';
+  var timeAgo = elapsed(t.created_at);
+
+  return '<div class="kanban-card" data-kid="' + t.id + '" draggable="true" ondragstart="kanbanDragStart(event)" ondragend="kanbanDragEnd(event)">' +
+    '<div class="flex items-center justify-between mb-1">' +
+      '<span class="text-xs font-semibold text-white" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(t.title) + '</span>' +
+      '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + priorityDot + ';margin-left:6px;flex-shrink:0" title="Priority: ' + t.priority + '"></span>' +
+    '</div>' +
+    '<div class="flex items-center justify-between text-xs">' +
+      agentLabel + costLabel +
+    '</div>' +
+    '<div class="flex items-center justify-between mt-1">' +
+      '<span class="text-xs text-gray-600">' + timeAgo + '</span>' +
+      (t.handoff_chain ? '<span style="font-size:10px;color:#60a5fa" title="Pipeline">\u2B95 ' + (t.current_step + 1) + '/' + JSON.parse(t.handoff_chain).length + '</span>' : '') +
+    '</div>' +
+  '</div>';
+}
+
+// Kanban drag-and-drop
+var kanbanDragId = null;
+
+function kanbanDragStart(e) {
+  kanbanDragId = e.target.dataset.kid;
+  e.target.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+function kanbanDragEnd(e) {
+  e.target.classList.remove('dragging');
+  kanbanDragId = null;
+}
+
+function kanbanDragOver(e) {
+  e.preventDefault();
+  e.currentTarget.classList.add('drag-over');
+}
+
+function kanbanDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+
+async function kanbanDrop(e) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  if (!kanbanDragId) return;
+  var newStatus = e.currentTarget.dataset.kanbanStatus;
+  try {
+    await fetch(BASE + '/api/mission/tasks/' + kanbanDragId + '?token=' + TOKEN, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    });
+    await loadKanban();
+  } catch(err) { console.error('Kanban drop error:', err); }
+}
 
 async function refreshAll() {
   const btn = document.getElementById('refresh-btn').querySelector('svg');
   btn.classList.add('refresh-spin');
-  await Promise.all([loadInfo(), loadTasks(), loadMemories(), loadHealth(), loadTokens(), loadAgents(), loadHiveMind(), loadSummary(), loadMissionControl()]);
+  await Promise.all([loadInfo(), loadTasks(), loadMemories(), loadHealth(), loadTokens(), loadAgents(), loadHiveMind(), loadSummary(), loadMissionControl(), loadAgentRail(), loadKanban()]);
   btn.classList.remove('refresh-spin');
   document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
 }

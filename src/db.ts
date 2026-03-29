@@ -217,18 +217,26 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS mission_tasks (
-      id              TEXT PRIMARY KEY,
-      title           TEXT NOT NULL,
-      prompt          TEXT NOT NULL,
-      assigned_agent  TEXT,
-      status          TEXT NOT NULL DEFAULT 'queued',
-      result          TEXT,
-      error           TEXT,
-      created_by      TEXT NOT NULL DEFAULT 'dashboard',
-      priority        INTEGER NOT NULL DEFAULT 0,
-      created_at      INTEGER NOT NULL,
-      started_at      INTEGER,
-      completed_at    INTEGER
+      id                  TEXT PRIMARY KEY,
+      title               TEXT NOT NULL,
+      prompt              TEXT NOT NULL,
+      assigned_agent      TEXT,
+      status              TEXT NOT NULL DEFAULT 'queued',
+      result              TEXT,
+      error               TEXT,
+      created_by          TEXT NOT NULL DEFAULT 'dashboard',
+      priority            INTEGER NOT NULL DEFAULT 0,
+      created_at          INTEGER NOT NULL,
+      started_at          INTEGER,
+      completed_at        INTEGER,
+      acceptance_criteria TEXT,
+      handoff_chain       TEXT,
+      current_step        INTEGER NOT NULL DEFAULT 0,
+      model_used          TEXT,
+      tokens_used         INTEGER NOT NULL DEFAULT 0,
+      cost_eur            REAL NOT NULL DEFAULT 0,
+      max_cost            REAL,
+      pipeline_status     TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_mission_status
@@ -526,6 +534,22 @@ function runMigrations(database: Database.Database): void {
         ON mission_tasks(assigned_agent, status, priority DESC, created_at ASC);
     `);
     logger.info('Migration: made mission_tasks.assigned_agent nullable');
+  }
+
+  // Issue tracking: add new columns to mission_tasks for issue-based work tracking
+  const missionColNames = missionCols.map((c) => c.name);
+  if (!missionColNames.includes('acceptance_criteria')) {
+    database.exec(`
+      ALTER TABLE mission_tasks ADD COLUMN acceptance_criteria TEXT;
+      ALTER TABLE mission_tasks ADD COLUMN handoff_chain TEXT;
+      ALTER TABLE mission_tasks ADD COLUMN current_step INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE mission_tasks ADD COLUMN model_used TEXT;
+      ALTER TABLE mission_tasks ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE mission_tasks ADD COLUMN cost_eur REAL NOT NULL DEFAULT 0;
+      ALTER TABLE mission_tasks ADD COLUMN max_cost REAL;
+      ALTER TABLE mission_tasks ADD COLUMN pipeline_status TEXT;
+    `);
+    logger.info('Migration: added issue tracking columns to mission_tasks');
   }
 }
 
@@ -1751,12 +1775,18 @@ export function getInterAgentTasks(
 
 // ── Mission Tasks (one-shot async tasks for Mission Control) ─────────
 
+export type IssueStatus =
+  | 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'done'
+  | 'blocked' | 'cancelled'
+  // Legacy statuses (backward compat with existing mission tasks)
+  | 'queued' | 'running' | 'completed' | 'failed';
+
 export interface MissionTask {
   id: string;
   title: string;
   prompt: string;
   assigned_agent: string | null;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: IssueStatus;
   result: string | null;
   error: string | null;
   created_by: string;
@@ -1764,6 +1794,15 @@ export interface MissionTask {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  // Issue tracking fields (Phase 1)
+  acceptance_criteria: string | null;
+  handoff_chain: string | null;       // JSON: string[] of agent IDs
+  current_step: number;
+  model_used: string | null;
+  tokens_used: number;
+  cost_eur: number;
+  max_cost: number | null;
+  pipeline_status: string | null;     // 'running' | 'paused' | 'completed' | 'failed'
 }
 
 export function createMissionTask(
@@ -1773,12 +1812,70 @@ export function createMissionTask(
   assignedAgent: string | null = null,
   createdBy = 'dashboard',
   priority = 0,
+  opts?: {
+    status?: IssueStatus;
+    acceptance_criteria?: string;
+    handoff_chain?: string[];
+    max_cost?: number;
+  },
 ): void {
   const now = Math.floor(Date.now() / 1000);
+  const status = opts?.status ?? 'queued';
+  const ac = opts?.acceptance_criteria ?? null;
+  const chain = opts?.handoff_chain ? JSON.stringify(opts.handoff_chain) : null;
+  const maxCost = opts?.max_cost ?? null;
   db.prepare(
-    `INSERT INTO mission_tasks (id, title, prompt, assigned_agent, status, created_by, priority, created_at)
-     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
-  ).run(id, title, prompt, assignedAgent, createdBy, priority, now);
+    `INSERT INTO mission_tasks (id, title, prompt, assigned_agent, status, created_by, priority, created_at, acceptance_criteria, handoff_chain, max_cost)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, title, prompt, assignedAgent, status, createdBy, priority, now, ac, chain, maxCost);
+}
+
+/** Update issue status with validation. */
+export function updateIssueStatus(id: string, newStatus: IssueStatus): boolean {
+  const result = db.prepare(
+    `UPDATE mission_tasks SET status = ?, started_at = CASE WHEN ? = 'in_progress' AND started_at IS NULL THEN ? ELSE started_at END, completed_at = CASE WHEN ? IN ('done', 'completed', 'cancelled', 'failed') THEN ? ELSE completed_at END WHERE id = ?`,
+  ).run(newStatus, newStatus, Math.floor(Date.now() / 1000), newStatus, Math.floor(Date.now() / 1000), id);
+  return result.changes > 0;
+}
+
+/** Update issue fields (title, prompt, acceptance_criteria, assigned_agent, priority). */
+export function updateIssueFields(
+  id: string,
+  fields: Partial<Pick<MissionTask, 'title' | 'prompt' | 'acceptance_criteria' | 'assigned_agent' | 'priority'>>,
+): boolean {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  for (const [key, val] of Object.entries(fields)) {
+    if (val !== undefined) {
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+  }
+  if (sets.length === 0) return false;
+  params.push(id);
+  const result = db.prepare(`UPDATE mission_tasks SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  return result.changes > 0;
+}
+
+/** Record cost data after an agent run on an issue. */
+export function updateIssueCost(id: string, model: string, tokens: number, costEur: number): void {
+  db.prepare(
+    `UPDATE mission_tasks SET model_used = ?, tokens_used = tokens_used + ?, cost_eur = cost_eur + ? WHERE id = ?`,
+  ).run(model, tokens, costEur, id);
+}
+
+/** Get issues by status for kanban views. */
+export function getIssuesByStatus(): Record<string, MissionTask[]> {
+  const all = db.prepare(
+    `SELECT * FROM mission_tasks ORDER BY priority DESC, created_at ASC`,
+  ).all() as MissionTask[];
+  const grouped: Record<string, MissionTask[]> = {};
+  for (const task of all) {
+    const s = task.status;
+    if (!grouped[s]) grouped[s] = [];
+    grouped[s].push(task);
+  }
+  return grouped;
 }
 
 export function getUnassignedMissionTasks(): MissionTask[] {

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -20,7 +21,8 @@ import {
   STREAM_STRATEGY,
   AUTO_ROTATE_PCT,
 } from './config.js';
-import { clearSession, getRecentConversation, getRecentMemories, getRecentTaskOutputs, getSession, getSessionConversation, logToHiveMind, pinMemory, unpinMemory, setSession, lookupWaChatId, saveWaMessageMap, saveTokenUsage } from './db.js';
+import { clearSession, getRecentConversation, getRecentMemories, getRecentTaskOutputs, getSession, getSessionConversation, logToHiveMind, pinMemory, unpinMemory, setSession, lookupWaChatId, saveWaMessageMap, saveTokenUsage, createMissionTask, getMissionTask } from './db.js';
+import type { IssueStatus } from './db.js';
 import { logger } from './logger.js';
 import { downloadMedia, buildPhotoMessage, buildDocumentMessage, buildVideoMessage } from './media.js';
 import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn } from './memory.js';
@@ -883,6 +885,7 @@ export function createBot(): Bot {
       '/stop — Stop current processing\n' +
       '/agents — List available agents\n' +
       '/delegate — Delegate task to agent\n' +
+      '/issue — Create a tracked issue\n' +
       '/lock — Lock session (PIN required to unlock)\n' +
       '/status — Security status\n\n' +
       'Delegation: @agentId: prompt or /delegate agentId prompt\n\n' +
@@ -1122,6 +1125,46 @@ export function createBot(): Bot {
     const base = DASHBOARD_URL || `http://localhost:${DASHBOARD_PORT}`;
     const url = `${base}/?token=${DASHBOARD_TOKEN}&chatId=${chatIdStr}`;
     await ctx.reply(`<a href="${url}">Open Dashboard</a>`, { parse_mode: 'HTML' });
+  });
+
+  // /issue — create an issue from Telegram
+  // Syntax: /issue title | agent | priority  OR  /issue title
+  bot.command('issue', async (ctx) => {
+    if (await replyIfLocked(ctx)) return;
+    const text = ctx.match?.toString().trim();
+    if (!text) {
+      await ctx.reply(
+        'Usage: /issue Title here\n' +
+        'Or: /issue Title | agent | priority (0-10)\n\n' +
+        'Examples:\n' +
+        '/issue Review landing page copy\n' +
+        '/issue Extract signals from latest scan | oracle | 5',
+      );
+      return;
+    }
+
+    const parts = text.split('|').map((s) => s.trim());
+    const title = parts[0];
+    const agentId = parts[1] || null;
+    const priority = parts[2] ? Math.max(0, Math.min(10, parseInt(parts[2], 10) || 0)) : 0;
+
+    if (!title || title.length > 200) {
+      await ctx.reply('Title is required (max 200 chars).');
+      return;
+    }
+
+    const id = crypto.randomBytes(4).toString('hex');
+    createMissionTask(id, title, title, agentId, 'telegram', priority, { status: 'backlog' });
+
+    const task = getMissionTask(id);
+    const agentLabel = task?.assigned_agent ?? 'unassigned';
+    await ctx.reply(
+      `Issue created: ${title}\n` +
+      `ID: ${id}\n` +
+      `Agent: ${agentLabel}\n` +
+      `Priority: ${priority}\n` +
+      `Status: backlog`,
+    );
   });
 
   // /stop — interrupt the current agent query

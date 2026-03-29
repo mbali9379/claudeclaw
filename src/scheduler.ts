@@ -11,6 +11,7 @@ import {
   claimNextMissionTask,
   completeMissionTask,
   resetStuckMissionTasks,
+  updateIssueCost,
 } from './db.js';
 import { logger } from './logger.js';
 import { ingestConversationTurn } from './memory-ingest.js';
@@ -177,6 +178,14 @@ async function runDueMissionTasks(): Promise<void> {
       } else {
         const text = result.text?.trim() || 'Task completed with no output.';
         completeMissionTask(mission.id, text, 'completed');
+
+        // Track cost data against the issue
+        if (result.usage) {
+          const totalTokens = result.usage.inputTokens + result.usage.outputTokens;
+          const costEur = result.usage.totalCostUsd * 0.92; // USD to EUR approximate
+          updateIssueCost(mission.id, 'claude', totalTokens, costEur);
+        }
+
         logger.info({ missionId: mission.id }, 'Mission task completed');
 
         // Send result to Telegram
