@@ -2519,7 +2519,6 @@ setInterval(refreshAll, 60000);
 
 // Initial load
 refreshAll();
-connectChatSSE();
 
 // \u2500\u2500 Chat \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 let chatOpen = false;
@@ -2528,6 +2527,9 @@ let chatHistoryLoaded = false;
 let unreadCount = 0;
 let chatAgents = [];
 let activeAgentTab = 'all';
+
+// Connect SSE on load so responses arrive even before chat panel opens
+connectChatSSE();
 
 function openChat() {
   chatOpen = true;
