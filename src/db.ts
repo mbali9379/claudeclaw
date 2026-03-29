@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import { DB_ENCRYPTION_KEY, STORE_DIR } from './config.js';
+import { DB_ENCRYPTION_KEY, STORE_DIR, USD_TO_EUR } from './config.js';
 import { cosineSimilarity } from './embeddings.js';
 import { logger } from './logger.js';
 
@@ -537,18 +537,26 @@ function runMigrations(database: Database.Database): void {
   }
 
   // Issue tracking: add new columns to mission_tasks for issue-based work tracking
+  // Each column added individually to survive partial migration (SQLite has no ADD COLUMN IF NOT EXISTS)
   const missionColNames = missionCols.map((c) => c.name);
-  if (!missionColNames.includes('acceptance_criteria')) {
-    database.exec(`
-      ALTER TABLE mission_tasks ADD COLUMN acceptance_criteria TEXT;
-      ALTER TABLE mission_tasks ADD COLUMN handoff_chain TEXT;
-      ALTER TABLE mission_tasks ADD COLUMN current_step INTEGER NOT NULL DEFAULT 0;
-      ALTER TABLE mission_tasks ADD COLUMN model_used TEXT;
-      ALTER TABLE mission_tasks ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0;
-      ALTER TABLE mission_tasks ADD COLUMN cost_eur REAL NOT NULL DEFAULT 0;
-      ALTER TABLE mission_tasks ADD COLUMN max_cost REAL;
-      ALTER TABLE mission_tasks ADD COLUMN pipeline_status TEXT;
-    `);
+  const issueColumns: Array<[string, string]> = [
+    ['acceptance_criteria', 'TEXT'],
+    ['handoff_chain', 'TEXT'],
+    ['current_step', 'INTEGER NOT NULL DEFAULT 0'],
+    ['model_used', 'TEXT'],
+    ['tokens_used', 'INTEGER NOT NULL DEFAULT 0'],
+    ['cost_eur', 'REAL NOT NULL DEFAULT 0'],
+    ['max_cost', 'REAL'],
+    ['pipeline_status', 'TEXT'],
+  ];
+  let addedIssueCols = false;
+  for (const [col, def] of issueColumns) {
+    if (!missionColNames.includes(col)) {
+      database.exec(`ALTER TABLE mission_tasks ADD COLUMN ${col} ${def}`);
+      addedIssueCols = true;
+    }
+  }
+  if (addedIssueCols) {
     logger.info('Migration: added issue tracking columns to mission_tasks');
   }
 }
@@ -1649,8 +1657,6 @@ export function getSessionConversation(sessionId: string, limit = 40): Conversat
 export function checkAgentBudget(agentId: string, dailyCapEur?: number, weeklyCapEur?: number): string | null {
   if (!dailyCapEur && !weeklyCapEur) return null; // no budget set
 
-  const USD_TO_EUR = 0.92;
-
   if (dailyCapEur) {
     const stats = getAgentTokenStats(agentId);
     const todayEur = stats.todayCost * USD_TO_EUR;
@@ -1879,10 +1885,11 @@ export function updateIssueFields(
   id: string,
   fields: Partial<Pick<MissionTask, 'title' | 'prompt' | 'acceptance_criteria' | 'assigned_agent' | 'priority'>>,
 ): boolean {
+  const ALLOWED_FIELDS = new Set(['title', 'prompt', 'acceptance_criteria', 'assigned_agent', 'priority']);
   const sets: string[] = [];
   const params: unknown[] = [];
   for (const [key, val] of Object.entries(fields)) {
-    if (val !== undefined) {
+    if (val !== undefined && ALLOWED_FIELDS.has(key)) {
       sets.push(`${key} = ?`);
       params.push(val);
     }
@@ -1932,6 +1939,42 @@ export function advancePipelineStep(id: string, nextAgent: string): MissionTask 
     `UPDATE mission_tasks SET current_step = ?, assigned_agent = ?, status = 'in_progress', pipeline_status = 'running' WHERE id = ?`,
   ).run(nextStep, nextAgent, id);
   return getMissionTask(id);
+}
+
+/** Atomically complete a mission task and advance pipeline in one transaction.
+ *  Returns the next agent ID if handoff occurred, null if pipeline complete, undefined if not a pipeline. */
+export function completeMissionTaskAndAdvance(
+  id: string,
+  result: string | null,
+  status: 'completed' | 'failed',
+  error?: string,
+): { nextAgent: string | null; pipelineComplete: boolean } | null {
+  const txn = db.transaction(() => {
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(
+      `UPDATE mission_tasks SET status = ?, result = ?, error = ?, completed_at = ? WHERE id = ?`,
+    ).run(status, result, error ?? null, now, id);
+
+    const task = getMissionTask(id);
+    if (!task?.handoff_chain) return null; // not a pipeline
+
+    const chain: string[] = JSON.parse(task.handoff_chain);
+    const nextStep = task.current_step + 1;
+
+    if (nextStep >= chain.length) {
+      db.prepare(
+        `UPDATE mission_tasks SET current_step = ?, pipeline_status = 'completed', status = 'done', completed_at = ? WHERE id = ?`,
+      ).run(nextStep, now, id);
+      return { nextAgent: null, pipelineComplete: true };
+    }
+
+    const nextAgent = chain[nextStep];
+    db.prepare(
+      `UPDATE mission_tasks SET current_step = ?, assigned_agent = ?, status = 'in_progress', pipeline_status = 'running', completed_at = NULL WHERE id = ?`,
+    ).run(nextStep, nextAgent, id);
+    return { nextAgent, pipelineComplete: false };
+  });
+  return txn();
 }
 
 /** Pause pipeline on failure. */

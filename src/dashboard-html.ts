@@ -2204,7 +2204,7 @@ function filterByAgent(agentId) {
   if (chatTitle) {
     var agentCol = AGENT_COLORS[agentId] || '#6b7280';
     chatTitle.innerHTML = agentId && agentId !== 'main'
-      ? 'Chat <span style="color:' + agentCol + ';font-size:12px">@' + agentId + '</span>'
+      ? 'Chat <span style="color:' + agentCol + ';font-size:12px">@' + escapeHtml(agentId) + '</span>'
       : 'Chat';
   }
 }
@@ -2285,7 +2285,7 @@ function renderKanbanCard(t) {
 
   var pipelineHtml = '';
   if (t.handoff_chain) {
-    var chain = JSON.parse(t.handoff_chain);
+    var chain = []; try { chain = JSON.parse(t.handoff_chain); } catch(e) {}
     var stepLabel = (t.current_step + 1) + '/' + chain.length;
     var isPaused = t.pipeline_status === 'paused';
     pipelineHtml = '<div class="flex items-center gap-1 mt-1">' +

@@ -252,6 +252,15 @@ export function startDashboard(botApi?: Api<RawApi>): void {
       }
     }
 
+    // Validate handoff_chain agents if provided
+    if (body?.handoff_chain && Array.isArray(body.handoff_chain)) {
+      const validAgents = ['main', ...listAgentIds()];
+      const invalid = body.handoff_chain.filter((a: string) => !validAgents.includes(a));
+      if (invalid.length > 0) {
+        return c.json({ error: `Unknown agents in pipeline: ${invalid.join(', ')}. Valid: ${validAgents.join(', ')}` }, 400);
+      }
+    }
+
     const id = crypto.randomBytes(4).toString('hex');
     createMissionTask(id, title, prompt, assignedAgent, 'dashboard', priority, {
       status: body?.status,
@@ -372,7 +381,8 @@ export function startDashboard(botApi?: Api<RawApi>): void {
     const task = getMissionTask(id);
     if (!task) return c.json({ error: 'Not found' }, 404);
     if (!task.handoff_chain) return c.json({ error: 'Not a pipeline issue' }, 400);
-    const chain: string[] = JSON.parse(task.handoff_chain);
+    let chain: string[];
+    try { chain = JSON.parse(task.handoff_chain); } catch { return c.json({ error: 'Invalid pipeline chain' }, 400); }
     const nextStep = task.current_step + 1;
     if (nextStep >= chain.length) {
       updateIssueStatus(id, 'done');

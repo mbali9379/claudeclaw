@@ -118,6 +118,9 @@ export const AGENT_TIMEOUT_MS = parseInt(
   10,
 );
 
+/** Approximate USD to EUR conversion rate for cost display. */
+export const USD_TO_EUR = 0.92;
+
 // Context window limit for the model. Opus 4.6 (1M context) = 1,000,000.
 // Override via CONTEXT_LIMIT in .env if using a different model variant.
 export const CONTEXT_LIMIT = parseInt(

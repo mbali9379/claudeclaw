@@ -1,6 +1,6 @@
 import { CronExpressionParser } from 'cron-parser';
 
-import { AGENT_ID, ALLOWED_CHAT_ID } from './config.js';
+import { AGENT_ID, ALLOWED_CHAT_ID, USD_TO_EUR } from './config.js';
 import {
   getDueTasks,
   getSession,
@@ -22,7 +22,7 @@ import { messageQueue } from './message-queue.js';
 import { runAgent } from './agent.js';
 import { loadAgentConfig } from './agent-config.js';
 import { formatForTelegram, splitMessage } from './bot.js';
-import { tryPipelineHandoff } from './orchestrator.js';
+import { completeMissionAndHandoff } from './orchestrator.js';
 import { emitChatEvent } from './state.js';
 
 type Sender = (text: string) => Promise<void>;
@@ -199,31 +199,34 @@ async function runDueMissionTasks(): Promise<void> {
         try { await sender('Mission task timed out: "' + mission.title + '"'); } catch {}
       } else {
         const text = result.text?.trim() || 'Task completed with no output.';
-        completeMissionTask(mission.id, text, 'completed');
 
         // Track cost data against the issue
         if (result.usage) {
           const totalTokens = result.usage.inputTokens + result.usage.outputTokens;
-          const costEur = result.usage.totalCostUsd * 0.92; // USD to EUR approximate
+          const costEur = result.usage.totalCostUsd * USD_TO_EUR;
           updateIssueCost(mission.id, 'claude', totalTokens, costEur);
         }
 
-        logger.info({ missionId: mission.id }, 'Mission task completed');
-
-        // Check for pipeline handoff
-        const handedOff = await tryPipelineHandoff(mission.id, text, chatId, async (msg) => {
+        // Atomically complete + pipeline advance (if applicable)
+        const handedOff = await completeMissionAndHandoff(mission.id, text, chatId, async (msg) => {
           try { await sender(msg); } catch {}
         });
         if (handedOff) {
-          // Pipeline continues -- don't send full result to Telegram, just a status update
+          logger.info({ missionId: mission.id }, 'Pipeline handoff triggered');
           try { await sender('Pipeline step done for "' + mission.title + '" -- handing off to next agent'); } catch {}
           emitChatEvent({
-            type: 'mission_update' as 'progress',
+            type: 'mission_update',
             chatId,
             content: JSON.stringify({ id: mission.id, status: 'pipeline_handoff', title: mission.title }),
           });
           return;
         }
+
+        // Non-pipeline task: complete normally
+        if (!getMissionTask(mission.id)?.handoff_chain) {
+          completeMissionTask(mission.id, text, 'completed');
+        }
+        logger.info({ missionId: mission.id }, 'Mission task completed');
 
         // Send result to Telegram
         for (const chunk of splitMessage(formatForTelegram(text))) {
@@ -250,7 +253,7 @@ async function runDueMissionTasks(): Promise<void> {
       }
 
       emitChatEvent({
-        type: 'mission_update' as 'progress',
+        type: 'mission_update',
         chatId,
         content: JSON.stringify({
           id: mission.id,

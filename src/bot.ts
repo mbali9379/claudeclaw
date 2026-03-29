@@ -28,6 +28,7 @@ import { downloadMedia, buildPhotoMessage, buildDocumentMessage, buildVideoMessa
 import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn } from './memory.js';
 import { setHighImportanceCallback } from './memory-ingest.js';
 import { messageQueue } from './message-queue.js';
+import { listAgentIds } from './agent-config.js';
 import { parseDelegation, delegateToAgent, getAvailableAgents } from './orchestrator.js';
 import { emitChatEvent, setProcessing, setActiveAbort, abortActiveQuery } from './state.js';
 import {
@@ -1151,6 +1152,15 @@ export function createBot(): Bot {
     if (!title || title.length > 200) {
       await ctx.reply('Title is required (max 200 chars).');
       return;
+    }
+
+    // Validate agent if provided
+    if (agentId) {
+      const validAgents = ['main', ...listAgentIds()];
+      if (!validAgents.includes(agentId)) {
+        await ctx.reply(`Unknown agent: ${agentId}\nAvailable: ${validAgents.join(', ')}`);
+        return;
+      }
     }
 
     const id = crypto.randomBytes(4).toString('hex');
