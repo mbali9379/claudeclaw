@@ -2193,19 +2193,36 @@ function filterByAgent(agentId) {
   loadHiveMind();
   loadTasks();
   loadSummary();
+
   // Update chat to show target agent
   var chatInput = document.getElementById('chat-input');
   var chatTitle = document.querySelector('.chat-header-title');
+  var delegationNote = agentId && agentId !== 'main' ? ' (via main)' : '';
   if (chatInput) {
     chatInput.setAttribute('placeholder', agentId && agentId !== 'main'
-      ? 'Message @' + agentId + '...'
+      ? 'Message @' + agentId + delegationNote + '...'
       : 'Send a message...');
   }
   if (chatTitle) {
     var agentCol = AGENT_COLORS[agentId] || '#6b7280';
     chatTitle.innerHTML = agentId && agentId !== 'main'
-      ? 'Chat <span style="color:' + agentCol + ';font-size:12px">@' + escapeHtml(agentId) + '</span>'
+      ? 'Chat <span style="color:' + agentCol + ';font-size:12px">@' + escapeHtml(agentId) + '</span><span style="font-size:9px;color:#666;margin-left:4px">via main</span>'
       : 'Chat';
+  }
+
+  // Sync chat agent tab
+  var tabAgent = agentId || 'all';
+  if (activeAgentTab !== tabAgent) {
+    activeAgentTab = tabAgent;
+    document.querySelectorAll('.chat-agent-tab').forEach(function(t) { t.classList.remove('active'); });
+    document.querySelectorAll('.chat-agent-tab').forEach(function(t) {
+      if (t.textContent.toLowerCase().replace(/^./, '') === agentId || (tabAgent === 'all' && t.textContent === 'All')) {
+        t.classList.add('active');
+      }
+    });
+    chatHistoryLoaded = false;
+    loadChatHistory();
+    loadSessionInfo();
   }
 }
 
@@ -2590,6 +2607,12 @@ function switchAgentTab(agentId, el) {
   chatHistoryLoaded = false;
   loadChatHistory();
   loadSessionInfo();
+
+  // Sync with rail filter so chat routing matches the tab
+  var mappedAgent = agentId === 'all' ? null : agentId;
+  if (railFilterAgent !== mappedAgent) {
+    filterByAgent(mappedAgent);
+  }
 }
 
 // Session Info
