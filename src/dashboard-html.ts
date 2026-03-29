@@ -90,6 +90,16 @@ export function getDashboardHtml(token: string, chatId: string): string {
   .cost-tier-green { color: #6ee7b7; }
   .cost-tier-amber { color: #fbbf24; }
   .cost-tier-red { color: #f87171; }
+  /* Command Palette */
+  .cmd-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 60; display: none; }
+  .cmd-palette { position: fixed; top: 20%; left: 50%; transform: translateX(-50%); width: 90%; max-width: 500px; background: #141414; border: 1px solid #2a2a2a; border-radius: 12px; z-index: 61; display: none; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+  .cmd-input { width: 100%; background: transparent; border: none; border-bottom: 1px solid #2a2a2a; padding: 14px 16px; color: #e0e0e0; font-size: 14px; outline: none; box-sizing: border-box; }
+  .cmd-results { max-height: 320px; overflow-y: auto; padding: 4px 0; }
+  .cmd-item { padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 10px; transition: background 0.1s; }
+  .cmd-item:hover, .cmd-item.active { background: #1e1e2e; }
+  .cmd-item-type { font-size: 10px; color: #6b7280; text-transform: uppercase; min-width: 50px; }
+  .cmd-item-title { font-size: 13px; color: #e0e0e0; flex: 1; }
+  .cmd-item-meta { font-size: 11px; color: #555; }
   /* Drawer */
   .drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 40; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
   .drawer-overlay.open { opacity: 1; pointer-events: auto; }
@@ -232,6 +242,7 @@ export function getDashboardHtml(token: string, chatId: string): string {
     </div>
   </div>
   <div id="agents-container" class="flex flex-wrap gap-3"></div>
+  <div id="live-transcript" class="card mt-2" style="display:none;max-height:160px;overflow-y:auto"></div>
 </div>
 
 <!-- Hive Mind Feed -->
@@ -264,6 +275,13 @@ export function getDashboardHtml(token: string, chatId: string): string {
     </div>
   </div>
   <div id="kanban-board" class="kanban-board"></div>
+</div>
+
+<!-- Command Palette -->
+<div id="cmd-overlay" class="cmd-overlay" onclick="closeCmdPalette()"></div>
+<div id="cmd-palette" class="cmd-palette">
+  <input type="text" id="cmd-input" class="cmd-input" placeholder="Search issues, agents, tasks..." oninput="cmdSearch(this.value)" onkeydown="cmdKeydown(event)">
+  <div id="cmd-results" class="cmd-results"></div>
 </div>
 
 <!-- Legacy Mission Control (agent columns) -->
@@ -2020,6 +2038,42 @@ function closeTaskHistory() {
 setInterval(loadMissionControl, 15000);
 setInterval(loadKanban, 15000);
 
+// ── Live Transcript ─────────────────────────────────────────────────
+var transcriptBuffer = [];
+var MAX_TRANSCRIPT = 5;
+
+function addTranscriptEntry(text) {
+  if (!text) return;
+  transcriptBuffer.push({ text: text.slice(0, 120), time: Date.now() });
+  if (transcriptBuffer.length > MAX_TRANSCRIPT) transcriptBuffer.shift();
+  renderTranscript();
+}
+
+function renderTranscript() {
+  var el = document.getElementById('live-transcript');
+  if (!el) return;
+  if (transcriptBuffer.length === 0) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = '';
+  el.innerHTML = '<div class="text-xs text-gray-500 mb-1" style="font-weight:600">Live</div>' +
+    transcriptBuffer.map(function(entry) {
+      var age = Math.floor((Date.now() - entry.time) / 1000);
+      var ageStr = age < 60 ? age + 's ago' : Math.floor(age / 60) + 'm ago';
+      return '<div class="text-xs text-gray-400" style="padding:2px 0;border-bottom:1px solid #1e1e1e;line-height:1.4">' +
+        '<span style="color:#555;font-size:9px">' + ageStr + '</span> ' + escapeHtml(entry.text) +
+      '</div>';
+    }).join('');
+}
+
+// Clear transcript when processing stops
+function clearTranscript() {
+  transcriptBuffer = [];
+  var el = document.getElementById('live-transcript');
+  if (el) el.style.display = 'none';
+}
+
 // ── Agent Rail ──────────────────────────────────────────────────────
 let railFilterAgent = null;
 
@@ -2145,7 +2199,7 @@ function renderKanbanCard(t) {
 
   return '<div class="kanban-card" data-kid="' + t.id + '" draggable="true" ondragstart="kanbanDragStart(event)" ondragend="kanbanDragEnd(event)">' +
     '<div class="flex items-center justify-between mb-1">' +
-      '<span class="text-xs font-semibold text-white" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(t.title) + '</span>' +
+      '<span class="text-xs font-semibold text-white kanban-editable" data-field="title" data-kid="' + t.id + '" onclick="startInlineEdit(this)" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:text">' + escapeHtml(t.title) + '</span>' +
       '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + priorityDot + ';margin-left:6px;flex-shrink:0" title="Priority: ' + t.priority + '"></span>' +
     '</div>' +
     '<div class="flex items-center justify-between text-xs">' +
@@ -2156,6 +2210,156 @@ function renderKanbanCard(t) {
     '</div>' +
     pipelineHtml +
   '</div>';
+}
+
+// Inline editing
+var inlineEditTimer = null;
+
+function startInlineEdit(el) {
+  event.stopPropagation();
+  if (el.contentEditable === 'true') return;
+  el.contentEditable = 'true';
+  el.style.background = '#222';
+  el.style.borderRadius = '4px';
+  el.style.padding = '2px 4px';
+  el.style.outline = 'none';
+  el.style.whiteSpace = 'normal';
+  el.focus();
+
+  // Select all text
+  var range = document.createRange();
+  range.selectNodeContents(el);
+  var sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  el.addEventListener('blur', function onBlur() {
+    el.removeEventListener('blur', onBlur);
+    finishInlineEdit(el);
+  });
+
+  el.addEventListener('keydown', function onKey(e) {
+    if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+    if (e.key === 'Escape') { el.blur(); }
+  });
+
+  el.addEventListener('input', function() {
+    clearTimeout(inlineEditTimer);
+    inlineEditTimer = setTimeout(function() { saveInlineEdit(el); }, 800);
+  });
+}
+
+function finishInlineEdit(el) {
+  el.contentEditable = 'false';
+  el.style.background = '';
+  el.style.padding = '';
+  el.style.whiteSpace = 'nowrap';
+  clearTimeout(inlineEditTimer);
+  saveInlineEdit(el);
+}
+
+async function saveInlineEdit(el) {
+  var id = el.dataset.kid;
+  var field = el.dataset.field;
+  var value = el.textContent.trim();
+  if (!id || !field || !value) return;
+  try {
+    var body = {};
+    body[field] = value;
+    await fetch(BASE + '/api/mission/tasks/' + id + '?token=' + TOKEN, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch(e) { console.error('Inline save error:', e); }
+}
+
+// ── Command Palette ────��────────────────────────────────────────────
+var cmdData = { issues: [], agents: [], tasks: [] };
+var cmdActiveIdx = 0;
+var cmdItems = [];
+
+document.addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    openCmdPalette();
+  }
+});
+
+function openCmdPalette() {
+  document.getElementById('cmd-overlay').style.display = '';
+  document.getElementById('cmd-palette').style.display = '';
+  var input = document.getElementById('cmd-input');
+  input.value = '';
+  input.focus();
+  // Preload data
+  Promise.all([
+    api('/api/mission/tasks').then(function(d) { cmdData.issues = d.tasks || []; }),
+    api('/api/agents').then(function(d) { cmdData.agents = d.agents || []; }),
+    api('/api/tasks').then(function(d) { cmdData.tasks = d.tasks || []; }),
+  ]).then(function() { cmdSearch(''); });
+}
+
+function closeCmdPalette() {
+  document.getElementById('cmd-overlay').style.display = 'none';
+  document.getElementById('cmd-palette').style.display = 'none';
+}
+
+function cmdSearch(q) {
+  q = q.toLowerCase().trim();
+  cmdItems = [];
+
+  // Search agents
+  cmdData.agents.forEach(function(a) {
+    if (!q || a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q)) {
+      cmdItems.push({ type: 'agent', title: a.name, meta: a.running ? 'live' : 'off', action: function() { closeCmdPalette(); toggleAgentDetail(a.id); } });
+    }
+  });
+
+  // Search issues
+  cmdData.issues.forEach(function(t) {
+    if (!q || t.title.toLowerCase().includes(q) || (t.prompt && t.prompt.toLowerCase().includes(q))) {
+      var status = t.status;
+      var agent = t.assigned_agent || 'unassigned';
+      cmdItems.push({ type: 'issue', title: t.title, meta: status + ' @' + agent, action: function() { closeCmdPalette(); document.getElementById('kanban-section').scrollIntoView({behavior:'smooth'}); } });
+    }
+  });
+
+  // Search scheduled tasks
+  cmdData.tasks.forEach(function(t) {
+    if (!q || t.prompt.toLowerCase().includes(q)) {
+      cmdItems.push({ type: 'task', title: t.prompt.slice(0, 60), meta: t.status, action: function() { closeCmdPalette(); document.getElementById('tasks-inbox-section').scrollIntoView({behavior:'smooth'}); } });
+    }
+  });
+
+  cmdActiveIdx = 0;
+  renderCmdResults();
+}
+
+function renderCmdResults() {
+  var container = document.getElementById('cmd-results');
+  if (cmdItems.length === 0) {
+    container.innerHTML = '<div class="text-xs text-gray-600 text-center py-4">No results</div>';
+    return;
+  }
+  container.innerHTML = cmdItems.slice(0, 20).map(function(item, i) {
+    return '<div class="cmd-item' + (i === cmdActiveIdx ? ' active' : '') + '" data-cmd-idx="' + i + '" onclick="cmdSelect(' + i + ')" onmouseenter="cmdActiveIdx=' + i + ';renderCmdResults()">' +
+      '<span class="cmd-item-type">' + item.type + '</span>' +
+      '<span class="cmd-item-title">' + escapeHtml(item.title) + '</span>' +
+      '<span class="cmd-item-meta">' + escapeHtml(item.meta) + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+function cmdKeydown(e) {
+  if (e.key === 'Escape') { closeCmdPalette(); return; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); cmdActiveIdx = Math.min(cmdActiveIdx + 1, cmdItems.length - 1); renderCmdResults(); }
+  if (e.key === 'ArrowUp') { e.preventDefault(); cmdActiveIdx = Math.max(cmdActiveIdx - 1, 0); renderCmdResults(); }
+  if (e.key === 'Enter') { e.preventDefault(); cmdSelect(cmdActiveIdx); }
+}
+
+function cmdSelect(idx) {
+  if (cmdItems[idx] && cmdItems[idx].action) cmdItems[idx].action();
 }
 
 // Kanban drag-and-drop
@@ -2349,17 +2553,20 @@ function connectChatSSE() {
     hideTyping();
     if (!chatOpen) { unreadCount++; updateFabBadge(); }
     if (chatOpen) loadSessionInfo();
+    addTranscriptEntry(ev.content ? ev.content.slice(0, 120) : '');
   });
 
   chatSSE.addEventListener('processing', function(e) {
     const ev = JSON.parse(e.data);
-    if (ev.processing) showTyping(); else hideTyping();
+    if (ev.processing) showTyping(); else { hideTyping(); clearTranscript(); }
   });
 
   chatSSE.addEventListener('progress', function(e) {
     const ev = JSON.parse(e.data);
     showProgress(ev.description);
+    addTranscriptEntry(ev.description || '');
   });
+
 
   chatSSE.addEventListener('error', function(e) {
     // SSE error event
