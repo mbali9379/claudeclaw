@@ -1948,7 +1948,7 @@ async function openMissionModal() {
     var data = await api('/api/mission/templates');
     var container = document.getElementById('pipeline-templates');
     container.innerHTML = (data.templates || []).map(function(t) {
-      return '<button onclick="selectPipeline(\\'' + t.id + '\\')" style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;padding:4px 10px;font-size:11px;color:#a78bfa;cursor:pointer;transition:border-color 0.15s" title="' + escapeHtml(t.description) + ': ' + t.steps.join(' \\u2192 ') + '">' + escapeHtml(t.name) + '</button>';
+      return '<button data-tmpl="' + t.id + '" onclick="selectPipeline(this.dataset.tmpl)" style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;padding:4px 10px;font-size:11px;color:#a78bfa;cursor:pointer;transition:border-color 0.15s" title="' + escapeHtml(t.description) + ': ' + t.steps.join(' \\u2192 ') + '">' + escapeHtml(t.name) + '</button>';
     }).join('');
   } catch(e) {}
 
@@ -2174,7 +2174,7 @@ async function loadAgentRail() {
       var dotColor = a.running ? '#22c55e' : '#555';
       var initial = (a.name || a.id).charAt(0).toUpperCase();
       var isActive = railFilterAgent === a.id;
-      html += '<div class="agent-rail-btn' + (isActive ? ' active' : '') + '" onclick="filterByAgent(\\''+a.id+'\\')" title="' + escapeHtml(a.name) + '">' +
+      html += '<div class="agent-rail-btn' + (isActive ? ' active' : '') + '" data-rail-agent="' + a.id + '" onclick="filterByAgent(this.dataset.railAgent)" title="' + escapeHtml(a.name) + '">' +
         '<span class="rail-dot" style="background:' + dotColor + '"></span>' +
         '<span class="rail-icon" style="color:' + color + '">' + initial + '</span>' +
         '<span class="rail-label">' + escapeHtml(a.name || a.id) + '</span>' +
@@ -2193,12 +2193,19 @@ function filterByAgent(agentId) {
   loadHiveMind();
   loadTasks();
   loadSummary();
-  // Update chat placeholder to show target agent
+  // Update chat to show target agent
   var chatInput = document.getElementById('chat-input');
+  var chatTitle = document.querySelector('.chat-header-title');
   if (chatInput) {
-    chatInput.placeholder = agentId && agentId !== 'main'
+    chatInput.setAttribute('placeholder', agentId && agentId !== 'main'
       ? 'Message @' + agentId + '...'
-      : 'Send a message...';
+      : 'Send a message...');
+  }
+  if (chatTitle) {
+    var agentCol = AGENT_COLORS[agentId] || '#6b7280';
+    chatTitle.innerHTML = agentId && agentId !== 'main'
+      ? 'Chat <span style="color:' + agentCol + ';font-size:12px">@' + agentId + '</span>'
+      : 'Chat';
   }
 }
 
@@ -2283,8 +2290,8 @@ function renderKanbanCard(t) {
     var isPaused = t.pipeline_status === 'paused';
     pipelineHtml = '<div class="flex items-center gap-1 mt-1">' +
       '<span style="font-size:10px;color:' + (isPaused ? '#f87171' : '#60a5fa') + '">' + (isPaused ? '\u23F8 paused' : '\u2B95') + ' ' + stepLabel + '</span>' +
-      (isPaused ? '<button onclick="event.stopPropagation();resumePipeline(\\'' + t.id + '\\')" style="background:#1e3a5f;color:#60a5fa;border:none;border-radius:4px;padding:1px 6px;font-size:9px;cursor:pointer;margin-left:4px">\u25B6 Resume</button>' +
-        '<button onclick="event.stopPropagation();skipPipelineStep(\\'' + t.id + '\\')" style="background:#422006;color:#fbbf24;border:none;border-radius:4px;padding:1px 6px;font-size:9px;cursor:pointer">\u23ED Skip</button>' : '') +
+      (isPaused ? '<button data-pid="' + t.id + '" onclick="event.stopPropagation();resumePipeline(this.dataset.pid)" style="background:#1e3a5f;color:#60a5fa;border:none;border-radius:4px;padding:1px 6px;font-size:9px;cursor:pointer;margin-left:4px">\u25B6 Resume</button>' +
+        '<button data-pid="' + t.id + '" onclick="event.stopPropagation();skipPipelineStep(this.dataset.pid)" style="background:#422006;color:#fbbf24;border:none;border-radius:4px;padding:1px 6px;font-size:9px;cursor:pointer">\u23ED Skip</button>' : '') +
     '</div>';
   }
 
