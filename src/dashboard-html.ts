@@ -1026,11 +1026,35 @@ async function loadAgents() {
           modelOpts.map(m => '<div class="model-opt' + (currentModel === m ? ' model-active' : '') + '" data-model="' + m + '" onclick="pickModel(this)">' + modelShort(m) + '</div>').join('') +
         '</div>' +
       '</div>';
+      // Model tier colour
+      var tierColor = currentModel.includes('opus') ? '#f87171' : currentModel.includes('sonnet') ? '#fbbf24' : '#6ee7b7';
+      var tierLabel = '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + tierColor + ';margin-right:4px"></span>';
+
+      // Cost info
+      var costEur = (a.todayCost * 0.92).toFixed(2);
+      var costLine = '<div class="text-xs text-gray-500 mt-1">' + tierLabel + modelLabel + ' &middot; \u20AC' + costEur + '/day</div>';
+
+      // Budget utilisation
+      var budgetHtml = '';
+      if (a.budgetDailyEur) {
+        var dailyPct = Math.min(100, Math.round(((a.todayCost * 0.92) / a.budgetDailyEur) * 100));
+        var barColor = dailyPct >= 90 ? '#f87171' : dailyPct >= 60 ? '#fbbf24' : '#6ee7b7';
+        budgetHtml = '<div style="margin-top:4px;background:#2a2a2a;border-radius:3px;height:4px;overflow:hidden">' +
+          '<div style="width:' + dailyPct + '%;height:100%;background:' + barColor + ';border-radius:3px;transition:width 0.3s"></div>' +
+        '</div>' +
+        '<div class="text-xs" style="color:' + barColor + ';margin-top:2px">' + dailyPct + '% daily budget</div>';
+      }
+      if (a.overBudget) {
+        budgetHtml += '<div class="text-xs" style="color:#f87171;margin-top:2px">\u26A0 Over budget</div>';
+      }
+
       return '<div class="card clickable-card" style="min-width:130px;flex:1;max-width:220px;border-left:3px solid ' + color + '" data-agent="' + a.id + '" onclick="toggleAgentDetail(this.dataset.agent)">' +
         '<div class="font-bold text-white text-sm">' + a.name + '</div>' +
         '<div class="text-xs mt-1">' + dot + ' ' + statusText + '</div>' +
         modelSelect +
+        costLine +
         (a.running ? '<div class="text-xs text-gray-400 mt-1">' + a.todayTurns + ' turns</div>' : '') +
+        budgetHtml +
       '</div>';
     }).join('');
   } catch {}

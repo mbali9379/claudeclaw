@@ -14,11 +14,13 @@ import {
   updateIssueCost,
   getMissionTask,
   pausePipeline,
+  checkAgentBudget,
 } from './db.js';
 import { logger } from './logger.js';
 import { ingestConversationTurn } from './memory-ingest.js';
 import { messageQueue } from './message-queue.js';
 import { runAgent } from './agent.js';
+import { loadAgentConfig } from './agent-config.js';
 import { formatForTelegram, splitMessage } from './bot.js';
 import { tryPipelineHandoff } from './orchestrator.js';
 import { emitChatEvent } from './state.js';
@@ -158,6 +160,23 @@ async function runDueTasks(): Promise<void> {
 async function runDueMissionTasks(): Promise<void> {
   const mission = claimNextMissionTask(schedulerAgentId);
   if (!mission) return;
+
+  // Budget cap guard: check before dispatching
+  if (mission.assigned_agent && mission.assigned_agent !== 'main') {
+    try {
+      const config = loadAgentConfig(mission.assigned_agent);
+      const overBudget = checkAgentBudget(mission.assigned_agent, config.budgetDailyEur, config.budgetWeeklyEur);
+      if (overBudget) {
+        // Put the task back to queued and notify
+        completeMissionTask(mission.id, null, 'failed', `Budget cap: ${overBudget}`);
+        logger.warn({ missionId: mission.id, agent: mission.assigned_agent }, overBudget);
+        void sender(`Budget cap hit for ${mission.assigned_agent}: ${overBudget}. Task "${mission.title}" blocked.`).catch(() => {});
+        return;
+      }
+    } catch {
+      // Agent config not found -- proceed anyway (e.g. main bot)
+    }
+  }
 
   const missionKey = 'mission-' + mission.id;
   if (runningTaskIds.has(missionKey)) return;

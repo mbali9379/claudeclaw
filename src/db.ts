@@ -1645,6 +1645,42 @@ export function getSessionConversation(sessionId: string, limit = 40): Conversat
     .all(sessionId, limit) as ConversationTurn[];
 }
 
+/** Check if an agent is over its budget. Returns null if under budget, or a reason string if over. */
+export function checkAgentBudget(agentId: string, dailyCapEur?: number, weeklyCapEur?: number): string | null {
+  if (!dailyCapEur && !weeklyCapEur) return null; // no budget set
+
+  const USD_TO_EUR = 0.92;
+
+  if (dailyCapEur) {
+    const stats = getAgentTokenStats(agentId);
+    const todayEur = stats.todayCost * USD_TO_EUR;
+    if (todayEur >= dailyCapEur) {
+      return `Daily budget exceeded: EUR ${todayEur.toFixed(2)} / EUR ${dailyCapEur.toFixed(2)}`;
+    }
+  }
+
+  if (weeklyCapEur) {
+    const weeklyUsd = getAgentWeeklyCost(agentId);
+    const weeklyEur = weeklyUsd * USD_TO_EUR;
+    if (weeklyEur >= weeklyCapEur) {
+      return `Weekly budget exceeded: EUR ${weeklyEur.toFixed(2)} / EUR ${weeklyCapEur.toFixed(2)}`;
+    }
+  }
+
+  return null;
+}
+
+export function getAgentWeeklyCost(agentId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(cost_usd), 0) as weeklyCost
+       FROM token_usage
+       WHERE agent_id = ? AND created_at >= unixepoch('now', '-7 days')`,
+    )
+    .get(agentId) as { weeklyCost: number };
+  return row.weeklyCost;
+}
+
 export function getAgentTokenStats(agentId: string): { todayCost: number; todayTurns: number; allTimeCost: number } {
   const today = db
     .prepare(

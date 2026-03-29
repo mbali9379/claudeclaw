@@ -44,6 +44,8 @@ import {
   updateIssueFields,
   getIssuesByStatus,
   advancePipelineStep,
+  getAgentWeeklyCost,
+  checkAgentBudget,
 } from './db.js';
 import type { IssueStatus } from './db.js';
 
@@ -499,6 +501,8 @@ export function startDashboard(botApi?: Api<RawApi>): void {
           } catch { /* process not running */ }
         }
         const stats = getAgentTokenStats(id);
+        const weeklyCost = getAgentWeeklyCost(id);
+        const budgetStatus = checkAgentBudget(id, config.budgetDailyEur, config.budgetWeeklyEur);
         return {
           id,
           name: config.name,
@@ -507,9 +511,13 @@ export function startDashboard(botApi?: Api<RawApi>): void {
           running,
           todayTurns: stats.todayTurns,
           todayCost: stats.todayCost,
+          weeklyCost,
+          budgetDailyEur: config.budgetDailyEur ?? null,
+          budgetWeeklyEur: config.budgetWeeklyEur ?? null,
+          overBudget: budgetStatus,
         };
       } catch {
-        return { id, name: id, description: '', model: 'unknown', running: false, todayTurns: 0, todayCost: 0 };
+        return { id, name: id, description: '', model: 'unknown', running: false, todayTurns: 0, todayCost: 0, weeklyCost: 0, budgetDailyEur: null, budgetWeeklyEur: null, overBudget: null };
       }
     });
 
@@ -524,8 +532,9 @@ export function startDashboard(botApi?: Api<RawApi>): void {
       } catch { /* not running */ }
     }
     const mainStats = getAgentTokenStats('main');
+    const mainWeekly = getAgentWeeklyCost('main');
     const allAgents = [
-      { id: 'main', name: 'Main', description: 'Primary ClaudeClaw bot', model: 'claude-opus-4-6', running: mainRunning, todayTurns: mainStats.todayTurns, todayCost: mainStats.todayCost },
+      { id: 'main', name: 'Main', description: 'Primary ClaudeClaw bot', model: 'claude-opus-4-6', running: mainRunning, todayTurns: mainStats.todayTurns, todayCost: mainStats.todayCost, weeklyCost: mainWeekly, budgetDailyEur: null, budgetWeeklyEur: null, overBudget: null },
       ...agents,
     ];
 
