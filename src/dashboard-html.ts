@@ -2193,6 +2193,13 @@ function filterByAgent(agentId) {
   loadHiveMind();
   loadTasks();
   loadSummary();
+  // Update chat placeholder to show target agent
+  var chatInput = document.getElementById('chat-input');
+  if (chatInput) {
+    chatInput.placeholder = agentId && agentId !== 'main'
+      ? 'Message @' + agentId + '...'
+      : 'Send a message...';
+  }
 }
 
 // ── Issue Kanban Board ──────────────────────────────────────────────
@@ -2812,10 +2819,14 @@ async function sendChatMessage() {
   // Disable send while processing
   document.getElementById('chat-send-btn').disabled = true;
   try {
+    var chatBody = { message: text };
+    if (railFilterAgent && railFilterAgent !== 'main') {
+      chatBody.agent = railFilterAgent;
+    }
     await fetch(BASE + '/api/chat/send?token=' + TOKEN, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify(chatBody),
     });
   } catch(e) {
     console.error('Send error', e);

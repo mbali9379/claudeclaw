@@ -789,11 +789,38 @@ export function startDashboard(botApi?: Api<RawApi>): void {
   // Send message from dashboard
   app.post('/api/chat/send', async (c) => {
     if (!botApi) return c.json({ error: 'Bot API not available' }, 503);
-    const body = await c.req.json<{ message?: string }>();
+    const body = await c.req.json<{ message?: string; agent?: string }>();
     const message = body?.message?.trim();
     if (!message) return c.json({ error: 'message required' }, 400);
 
-    // Fire-and-forget: response comes via SSE
+    const targetAgent = body?.agent?.trim();
+    if (targetAgent && targetAgent !== 'main') {
+      // Route to specific agent via delegation
+      const validAgents = listAgentIds();
+      if (!validAgents.includes(targetAgent)) {
+        return c.json({ error: `Unknown agent: ${targetAgent}` }, 400);
+      }
+      const chatId = ALLOWED_CHAT_ID || 'dashboard';
+
+      // Emit user message via SSE so the dashboard shows it
+      const { emitChatEvent } = await import('./state.js');
+      emitChatEvent({ type: 'user_message', chatId, content: message, source: 'dashboard' });
+
+      // Delegate to agent (fire-and-forget, result comes via SSE)
+      const { delegateToAgent } = await import('./orchestrator.js');
+      void (async () => {
+        try {
+          const result = await delegateToAgent(targetAgent, message, chatId, 'main');
+          emitChatEvent({ type: 'assistant_message', chatId, content: result.text || 'No response', source: 'dashboard', agentId: targetAgent });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          emitChatEvent({ type: 'error', chatId, content: `Agent ${targetAgent} error: ${errMsg}`, source: 'dashboard' });
+        }
+      })();
+      return c.json({ ok: true, agent: targetAgent });
+    }
+
+    // Default: main bot
     void processMessageFromDashboard(botApi, message);
     return c.json({ ok: true });
   });
