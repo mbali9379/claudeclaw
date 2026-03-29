@@ -1666,9 +1666,23 @@ async function processDashboardMessage(
     // Relay to Telegram so the user sees it there too
     const { text: responseText } = extractFileMarkers(rawResponse);
     if (responseText) {
-      for (const part of splitMessage(formatForTelegram(responseText))) {
-        await botApi.sendMessage(parseInt(chatIdStr), part, { parse_mode: 'HTML' });
+      try {
+        for (const part of splitMessage(formatForTelegram(responseText))) {
+          await botApi.sendMessage(parseInt(chatIdStr), part, { parse_mode: 'HTML' });
+        }
+      } catch (tgErr) {
+        logger.error({ err: tgErr, chatId: chatIdStr }, 'Failed to relay dashboard response to Telegram');
+        // Retry without HTML parsing
+        try {
+          for (const part of splitMessage(responseText)) {
+            await botApi.sendMessage(parseInt(chatIdStr), part);
+          }
+        } catch (retryErr) {
+          logger.error({ err: retryErr, chatId: chatIdStr }, 'Telegram relay retry also failed');
+        }
       }
+    } else {
+      logger.warn({ chatId: chatIdStr, rawLen: rawResponse.length }, 'Dashboard response had no text after extractFileMarkers');
     }
 
     // Log token usage

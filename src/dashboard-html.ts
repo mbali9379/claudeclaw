@@ -2650,7 +2650,7 @@ function connectChatSSE() {
 
   chatSSE.addEventListener('assistant_message', function(e) {
     const ev = JSON.parse(e.data);
-    appendChatBubble('assistant', ev.content, ev.source, true);
+    appendChatBubble('assistant', ev.content, ev.agentId || ev.source, true);
     hideTyping();
     if (!chatOpen) { unreadCount++; updateFabBadge(); }
     if (chatOpen) loadSessionInfo();
@@ -2698,13 +2698,13 @@ function appendChatBubble(role, content, source, scroll) {
   const container = document.getElementById('chat-messages');
   const bubble = document.createElement('div');
   bubble.className = 'chat-bubble ' + (role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant');
-  bubble.innerHTML = role === 'assistant' ? renderMarkdown(content) : escapeHtml(content);
-  if (source && source !== 'telegram' && source !== 'dashboard') {
-    const srcBadge = document.createElement('div');
-    srcBadge.className = 'chat-bubble-source';
-    srcBadge.textContent = source.charAt(0).toUpperCase() + source.slice(1);
-    bubble.appendChild(srcBadge);
+  // Show agent label for non-main agent responses
+  var agentLabel = '';
+  if (role === 'assistant' && source && source !== 'telegram' && source !== 'dashboard' && source !== 'main') {
+    var agentCol = AGENT_COLORS[source] || '#6b7280';
+    agentLabel = '<div style="font-size:10px;font-weight:600;color:' + agentCol + ';margin-bottom:4px">@' + escapeHtml(source) + '</div>';
   }
+  bubble.innerHTML = agentLabel + (role === 'assistant' ? renderMarkdown(content) : escapeHtml(content));
   container.appendChild(bubble);
   if (scroll) scrollChatBottom();
 }
