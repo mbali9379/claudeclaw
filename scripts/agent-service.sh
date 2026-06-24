@@ -20,7 +20,11 @@ if [ -z "$ACTION" ] || [ -z "$AGENT_ID" ]; then
   exit 1
 fi
 
-SERVICE_NAME="com.claudeclaw.agent-${AGENT_ID}"
+if [ "$(uname)" = "Darwin" ]; then
+  SERVICE_NAME="com.claudeclaw.agent-${AGENT_ID}"
+else
+  SERVICE_NAME="claudeclaw-${AGENT_ID}"
+fi
 
 if [ "$(uname)" = "Darwin" ]; then
   # macOS: launchd plist
@@ -80,15 +84,19 @@ else
     mkdir -p "$UNIT_DIR"
     cat > "$UNIT_PATH" << UNIT
 [Unit]
-Description=ClaudeClaw Agent: ${AGENT_ID}
-After=network.target
+Description=ClaudeClaw Telegram Bot (${AGENT_ID})
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${NODE_PATH} ${PROJECT_DIR}/dist/index.js --agent ${AGENT_ID}
 WorkingDirectory=${PROJECT_DIR}
-Restart=always
-RestartSec=10
+ExecStart=${NODE_PATH} ${PROJECT_DIR}/dist/index.js --agent ${AGENT_ID}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
 
 [Install]
 WantedBy=default.target

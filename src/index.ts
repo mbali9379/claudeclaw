@@ -4,7 +4,8 @@ import path from 'path';
 import { loadAgentConfig, resolveAgentDir, resolveAgentClaudeMd } from './agent-config.js';
 import { createBot } from './bot.js';
 import { checkPendingMigrations } from './migrations.js';
-import { ALLOWED_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE } from './config.js';
+import { ALLOWED_CHAT_ID, ALLOWED_SLACK_USER_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE, SLACK_BOT_TOKEN, SLACK_APP_TOKEN, JUNE_SLACK_BOT_TOKEN, JUNE_SLACK_APP_TOKEN, DEFAULT_MODEL } from './config.js';
+import { createSlackBot } from './slack-bot.js';
 import { startDashboard } from './dashboard.js';
 import { initDatabase, cleanupOldMissionTasks, insertAuditLog } from './db.js';
 import { initSecurity, setAuditCallback } from './security.js';
@@ -16,9 +17,12 @@ import { initOrchestrator } from './orchestrator.js';
 import { initScheduler } from './scheduler.js';
 import { setTelegramConnected, setBotInfo } from './state.js';
 
-// Parse --agent flag
+// Parse --agent and --transport flags
 const agentFlagIndex = process.argv.indexOf('--agent');
 const AGENT_ID = agentFlagIndex !== -1 ? process.argv[agentFlagIndex + 1] : 'main';
+
+const transportFlagIndex = process.argv.indexOf('--transport');
+const TRANSPORT = transportFlagIndex !== -1 ? process.argv[transportFlagIndex + 1] : 'telegram';
 
 // Export AGENT_ID to env so child processes (schedule-cli, etc.) inherit it
 process.env.CLAUDECLAW_AGENT_ID = AGENT_ID;
@@ -48,18 +52,12 @@ if (AGENT_ID !== 'main') {
   // into the repo; that defeats the purpose of CLAUDECLAW_CONFIG and risks
   // accidentally committing personal config.
   const externalClaudeMd = path.join(CLAUDECLAW_CONFIG, 'CLAUDE.md');
+  let systemPrompt: string | undefined;
   if (fs.existsSync(externalClaudeMd)) {
-    let systemPrompt: string | undefined;
     try {
       systemPrompt = fs.readFileSync(externalClaudeMd, 'utf-8');
     } catch { /* unreadable */ }
     if (systemPrompt) {
-      setAgentOverrides({
-        agentId: 'main',
-        botToken: activeBotToken,
-        cwd: PROJECT_ROOT,
-        systemPrompt,
-      });
       logger.info({ source: externalClaudeMd }, 'Loaded CLAUDE.md from CLAUDECLAW_CONFIG');
     }
   } else if (!fs.existsSync(path.join(PROJECT_ROOT, 'CLAUDE.md'))) {
@@ -68,9 +66,27 @@ if (AGENT_ID !== 'main') {
       CLAUDECLAW_CONFIG,
     );
   }
+  // Always apply overrides for main so DEFAULT_MODEL is respected regardless
+  // of whether an external CLAUDE.md exists. Without this, the SDK subprocess
+  // inherits the CLI's saved model preference (e.g. fable) which may be unavailable.
+  if (DEFAULT_MODEL || systemPrompt) {
+    setAgentOverrides({
+      agentId: 'main',
+      botToken: activeBotToken,
+      cwd: PROJECT_ROOT,
+      model: DEFAULT_MODEL,
+      ...(systemPrompt ? { systemPrompt } : {}),
+    });
+  }
 }
 
-const PID_FILE = path.join(STORE_DIR, `${AGENT_ID === 'main' ? 'claudeclaw' : `agent-${AGENT_ID}`}.pid`);
+// Main runs on both transports concurrently; PID must include transport
+// so the telegram and slack processes don't kill each other on startup.
+// Sub-agents are single-transport so keep the agent-only PID.
+const PID_FILE = path.join(
+  STORE_DIR,
+  AGENT_ID === 'main' ? `claudeclaw-${TRANSPORT}.pid` : `agent-${AGENT_ID}.pid`,
+);
 
 function showBanner(): void {
   const bannerPath = path.join(PROJECT_ROOT, 'banner.txt');
@@ -103,14 +119,14 @@ function releaseLock(): void {
 }
 
 async function main(): Promise<void> {
-  
+
   checkPendingMigrations(PROJECT_ROOT);
 
   if (AGENT_ID === 'main') {
     showBanner();
   }
 
-  if (!activeBotToken) {
+  if (TRANSPORT === 'telegram' && !activeBotToken) {
     if (AGENT_ID === 'main') {
       logger.error('Bot token is not set. Run npm run setup to configure it.');
     } else {
@@ -136,10 +152,11 @@ async function main(): Promise<void> {
 
   initOrchestrator();
 
-  // Decay and consolidation run ONLY in the main process to prevent
-  // multi-process over-decay (5x decay on simultaneous restart) and
-  // duplicate consolidation records from overlapping memory batches.
-  if (AGENT_ID === 'main') {
+  // Decay and consolidation run ONLY in the main+telegram process to prevent
+  // multi-process over-decay (5x decay on simultaneous restart) and duplicate
+  // consolidation records. With dual-transport main, telegram is the leader.
+  const isDecayLeader = AGENT_ID === 'main' && TRANSPORT === 'telegram';
+  if (isDecayLeader) {
     runDecaySweep();
     cleanupOldMissionTasks(7);
     setInterval(() => { runDecaySweep(); cleanupOldMissionTasks(7); }, 24 * 60 * 60 * 1000);
@@ -160,65 +177,117 @@ async function main(): Promise<void> {
       logger.info('Memory consolidation enabled (every 30 min)');
     }
   } else {
-    logger.info({ agentId: AGENT_ID }, 'Skipping decay/consolidation (main process owns these)');
+    logger.info({ agentId: AGENT_ID, transport: TRANSPORT }, 'Skipping decay/consolidation (telegram leader owns these)');
   }
 
   cleanupOldUploads();
 
-  const bot = createBot();
+  if (TRANSPORT === 'slack') {
+    // ── Slack transport ──────────────────────────────────────────────
+    const agentConfig = AGENT_ID !== 'main' ? loadAgentConfig(AGENT_ID) : null;
+    // Main (Junebug) uses JUNE_SLACK_* env vars to match the sub-agent naming
+    // convention (BRIDGE_SLACK_*, SCOUT_SLACK_*, etc.). Falls back to the generic
+    // SLACK_BOT_TOKEN / SLACK_APP_TOKEN for backward compatibility.
+    const slackBotToken =
+      agentConfig?.slackBotToken
+      || (AGENT_ID === 'main' ? JUNE_SLACK_BOT_TOKEN : '')
+      || SLACK_BOT_TOKEN;
+    const slackAppToken =
+      agentConfig?.slackAppToken
+      || (AGENT_ID === 'main' ? JUNE_SLACK_APP_TOKEN : '')
+      || SLACK_APP_TOKEN;
 
-  // Dashboard only runs in the main bot process
-  if (AGENT_ID === 'main') {
-    startDashboard(bot.api);
-  }
+    if (!slackBotToken || !slackAppToken) {
+      logger.error({ agentId: AGENT_ID }, 'Slack tokens not set. Add BRIDGE_SLACK_BOT_TOKEN and BRIDGE_SLACK_APP_TOKEN to .env');
+      process.exit(1);
+    }
 
-  if (ALLOWED_CHAT_ID) {
-    initScheduler(
-      async (text) => {
-        // Split long messages to respect Telegram's 4096 char limit.
-        // The scheduler's splitMessage handles chunking, but the sender
-        // callback is also called directly for status messages which may exceed the limit.
-        const { splitMessage } = await import('./bot.js');
-        for (const chunk of splitMessage(text)) {
-          await bot.api.sendMessage(ALLOWED_CHAT_ID, chunk, { parse_mode: 'HTML' }).catch((err) =>
-            logger.error({ err }, 'Scheduler failed to send message'),
-          );
+    const slackBot = createSlackBot({
+      botToken: slackBotToken,
+      appToken: slackAppToken,
+      allowedUserId: ALLOWED_SLACK_USER_ID,
+      channelId: agentConfig?.slackChannelId,
+    });
+
+    if (ALLOWED_SLACK_USER_ID) {
+      // Channel-mode agents (e.g. Radar) send scheduler output to their feed channel,
+      // not to the user's DM — a user ID passed to postMessage would route as a DM.
+      const schedulerDestination = agentConfig?.slackChannelId ?? ALLOWED_SLACK_USER_ID;
+      initScheduler(
+        async (text) => { await slackBot.sendMessage(schedulerDestination, text); },
+        AGENT_ID,
+        'slack',
+      );
+    } else {
+      logger.warn('ALLOWED_SLACK_USER_ID not set — scheduler disabled');
+    }
+
+    const shutdown = async () => {
+      logger.info('Shutting down Slack bot...');
+      releaseLock();
+      await slackBot.stop();
+      process.exit(0);
+    };
+    process.on('SIGINT', () => void shutdown());
+    process.on('SIGTERM', () => void shutdown());
+
+    logger.info({ agentId: AGENT_ID }, 'Starting ClaudeClaw on Slack...');
+    await slackBot.start();
+
+  } else {
+    // ── Telegram transport ───────────────────────────────────────────
+    const bot = createBot();
+
+    if (AGENT_ID === 'main') {
+      startDashboard(bot.api);
+    }
+
+    if (ALLOWED_CHAT_ID) {
+      initScheduler(
+        async (text) => {
+          const { splitMessage } = await import('./bot.js');
+          for (const chunk of splitMessage(text)) {
+            await bot.api.sendMessage(ALLOWED_CHAT_ID, chunk, { parse_mode: 'HTML' }).catch((err) =>
+              logger.error({ err }, 'Scheduler failed to send message'),
+            );
+          }
+        },
+        AGENT_ID,
+        'telegram',
+      );
+    } else {
+      logger.warn('ALLOWED_CHAT_ID not set — scheduler disabled (no destination for results)');
+    }
+
+    const shutdown = async () => {
+      logger.info('Shutting down...');
+      setTelegramConnected(false);
+      releaseLock();
+      await bot.stop();
+      process.exit(0);
+    };
+    process.on('SIGINT', () => void shutdown());
+    process.on('SIGTERM', () => void shutdown());
+
+    logger.info({ agentId: AGENT_ID }, 'Starting ClaudeClaw...');
+
+    await bot.start({
+      onStart: (botInfo) => {
+        setTelegramConnected(true);
+        setBotInfo(botInfo.username ?? '', botInfo.first_name ?? 'ClaudeClaw');
+        logger.info({ username: botInfo.username }, 'ClaudeClaw is running');
+        if (AGENT_ID === 'main') {
+          console.log(`\n  ClaudeClaw online: @${botInfo.username}`);
+          if (!ALLOWED_CHAT_ID) {
+            console.log(`  Send /chatid to get your chat ID for ALLOWED_CHAT_ID`);
+          }
+          console.log();
+        } else {
+          console.log(`\n  ClaudeClaw agent [${AGENT_ID}] online: @${botInfo.username}\n`);
         }
       },
-      AGENT_ID,
-    );
-  } else {
-    logger.warn('ALLOWED_CHAT_ID not set — scheduler disabled (no destination for results)');
+    });
   }
-
-  const shutdown = async () => {
-    logger.info('Shutting down...');
-    setTelegramConnected(false);
-    releaseLock();
-    await bot.stop();
-    process.exit(0);
-  };
-  process.on('SIGINT', () => void shutdown());
-  process.on('SIGTERM', () => void shutdown());
-
-  logger.info({ agentId: AGENT_ID }, 'Starting ClaudeClaw...');
-
-  await bot.start({
-    onStart: (botInfo) => {
-      setTelegramConnected(true);
-      setBotInfo(botInfo.username ?? '', botInfo.first_name ?? 'ClaudeClaw');
-      logger.info({ username: botInfo.username }, 'ClaudeClaw is running');
-      if (AGENT_ID === 'main') {
-        console.log(`\n  ClaudeClaw online: @${botInfo.username}`);
-        if (!ALLOWED_CHAT_ID) {
-          console.log(`  Send /chatid to get your chat ID for ALLOWED_CHAT_ID`);
-        }
-        console.log();
-      } else {
-        console.log(`\n  ClaudeClaw agent [${AGENT_ID}] online: @${botInfo.username}\n`);
-      }
-    },
-  });
 }
 
 main().catch((err: unknown) => {

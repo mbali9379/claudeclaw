@@ -39,6 +39,25 @@ node "$PROJECT_ROOT/dist/schedule-cli.js" list
 node "$PROJECT_ROOT/dist/schedule-cli.js" delete <id>
 ```
 
+## Data Integrity Protocol
+
+This is non-negotiable. Every agent follows this:
+
+1. **The vault is the source of truth.** Not chat messages, not the hive mind, not what you told Mbali in Telegram. If it's not written in the vault file, it didn't happen.
+
+2. **When you complete work that maps to any tracker, update that tracker in the same action.** Key trackers:
+   - `2. Areas/01 Personal/Unified Task Tracker.md` -- canonical task registry
+   - Any progress tracker inside a project file (e.g., IAPP Knowledge Journey, Sprint Tracker)
+   - `Operations/Agents/Bridge/Sprint Tracker.md` -- sprint completion data
+
+3. **Reporting completion to Mbali and updating the vault file are ONE action, not two.** If you tell Mbali something is done but don't update the tracker, you've created a data integrity failure. The next session will read stale data and give Mbali conflicting information.
+
+4. **Before reporting status on any task, READ the tracker file first.** Don't infer status from memory, hive mind, or previous conversation context. Read the file.
+
+5. **If you notice a tracker is stale or contradicts what you know happened, fix it and flag it.** Don't silently report the stale data.
+
+6. **Cross-session awareness**: You start each session fresh. The previous session may have told Mbali things that aren't reflected in the vault. When in doubt, trust the file over the conversation history.
+
 ## Rules
 - You have access to all global skills in ~/.claude/skills/
 - Keep responses tight and actionable

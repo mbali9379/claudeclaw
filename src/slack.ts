@@ -1,17 +1,41 @@
 import { WebClient } from '@slack/web-api';
 
-import { SLACK_USER_TOKEN } from './config.js';
+import { SLACK_USER_TOKEN, AGENT_ID } from './config.js';
+import { readEnvFile } from './env.js';
 import { saveSlackMessage } from './db.js';
 import { logger } from './logger.js';
 
 let client: WebClient | null = null;
 
+/**
+ * Resolve a Slack token. Priority:
+ * 1. SLACK_USER_TOKEN (xoxp- user token, full API access)
+ * 2. Agent-specific bot token ({AGENT}_SLACK_BOT_TOKEN from .env)
+ * 3. JUNE_SLACK_BOT_TOKEN (main agent fallback)
+ */
+function resolveSlackToken(): string {
+  if (SLACK_USER_TOKEN) return SLACK_USER_TOKEN;
+
+  // Try agent-specific bot token
+  const agentKey = `${AGENT_ID.toUpperCase()}_SLACK_BOT_TOKEN`;
+  const env = readEnvFile([agentKey, 'JUNE_SLACK_BOT_TOKEN']);
+  const agentToken = process.env[agentKey] || env[agentKey] || '';
+  if (agentToken) return agentToken;
+
+  // Fallback to Junebug's bot token
+  const juneToken = process.env.JUNE_SLACK_BOT_TOKEN || env.JUNE_SLACK_BOT_TOKEN || '';
+  if (juneToken) return juneToken;
+
+  throw new Error(
+    `No Slack token available. Set SLACK_USER_TOKEN or ${agentKey} in .env`,
+  );
+}
+
 function getClient(): WebClient {
   if (!client) {
-    if (!SLACK_USER_TOKEN) {
-      throw new Error('SLACK_USER_TOKEN not set in .env');
-    }
-    client = new WebClient(SLACK_USER_TOKEN);
+    const token = resolveSlackToken();
+    client = new WebClient(token);
+    logger.info({ agentId: AGENT_ID, tokenType: token.startsWith('xoxp-') ? 'user' : 'bot' }, 'Slack client initialised');
   }
   return client;
 }

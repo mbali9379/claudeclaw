@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { readEnvFile } from './env.js';
 
 const envConfig = readEnvFile([
+  'DEFAULT_MODEL',
   'TELEGRAM_BOT_TOKEN',
   'ALLOWED_CHAT_ID',
   'GROQ_API_KEY',
@@ -12,6 +13,11 @@ const envConfig = readEnvFile([
   'ELEVENLABS_VOICE_ID',
   'WHATSAPP_ENABLED',
   'SLACK_USER_TOKEN',
+  'SLACK_BOT_TOKEN',
+  'SLACK_APP_TOKEN',
+  'JUNE_SLACK_BOT_TOKEN',
+  'JUNE_SLACK_APP_TOKEN',
+  'ALLOWED_SLACK_USER_ID',
   'CONTEXT_LIMIT',
   'DASHBOARD_PORT',
   'DASHBOARD_TOKEN',
@@ -64,6 +70,23 @@ export const WHATSAPP_ENABLED =
 
 export const SLACK_USER_TOKEN =
   process.env.SLACK_USER_TOKEN || envConfig.SLACK_USER_TOKEN || '';
+
+export const SLACK_BOT_TOKEN =
+  process.env.SLACK_BOT_TOKEN || envConfig.SLACK_BOT_TOKEN || '';
+
+export const SLACK_APP_TOKEN =
+  process.env.SLACK_APP_TOKEN || envConfig.SLACK_APP_TOKEN || '';
+
+// Junebug-specific Slack tokens for main agent on Slack transport.
+// Named JUNE_* to match sub-agent convention (BRIDGE_*, SCOUT_*, etc.).
+export const JUNE_SLACK_BOT_TOKEN =
+  process.env.JUNE_SLACK_BOT_TOKEN || envConfig.JUNE_SLACK_BOT_TOKEN || '';
+
+export const JUNE_SLACK_APP_TOKEN =
+  process.env.JUNE_SLACK_APP_TOKEN || envConfig.JUNE_SLACK_APP_TOKEN || '';
+
+export const ALLOWED_SLACK_USER_ID =
+  process.env.ALLOWED_SLACK_USER_ID || envConfig.ALLOWED_SLACK_USER_ID || '';
 
 // Voice — read via readEnvFile, not process.env
 export const GROQ_API_KEY = envConfig.GROQ_API_KEY ?? '';
@@ -151,6 +174,9 @@ export const DB_ENCRYPTION_KEY =
 // Google API key for Gemini (memory extraction + consolidation)
 export const GOOGLE_API_KEY =
   process.env.GOOGLE_API_KEY || envConfig.GOOGLE_API_KEY || '';
+
+export const DEFAULT_MODEL =
+  process.env.DEFAULT_MODEL || envConfig.DEFAULT_MODEL || undefined;
 
 // Streaming strategy for progressive Telegram updates.
 // 'global-throttle' (default): edits a placeholder message with streamed text,

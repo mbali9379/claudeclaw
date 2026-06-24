@@ -1233,6 +1233,35 @@ export function createBot(): Bot {
     await ctx.reply(lines.join('\n'));
   });
 
+  // /restart — restart a named systemd user service (e.g. /restart slack)
+  bot.command('restart', async (ctx) => {
+    if (!isAuthorised(ctx.chat!.id)) return;
+    const target = ctx.match?.trim().toLowerCase();
+    const ALLOWED: Record<string, string> = {
+      slack: 'claudeclaw-main-slack',
+      telegram: 'claudeclaw',
+      bridge: 'claudeclaw-bridge',
+      lens: 'claudeclaw-lens',
+      lumae: 'claudeclaw-lumae',
+      oracle: 'claudeclaw-oracle',
+      radar: 'claudeclaw-radar',
+      scout: 'claudeclaw-scout',
+    };
+    if (!target || !ALLOWED[target]) {
+      await ctx.reply(`Usage: /restart <service>\n\nAvailable: ${Object.keys(ALLOWED).join(', ')}`);
+      return;
+    }
+    const service = ALLOWED[target];
+    await ctx.reply(`Restarting ${service}...`);
+    const { execSync } = await import('child_process');
+    try {
+      execSync(`systemctl --user restart ${service}`, { stdio: 'ignore' });
+      await ctx.reply(`✓ ${service} restarted.`);
+    } catch (err) {
+      await ctx.reply(`Failed to restart ${service}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
   // /delegate — delegate task to an agent (handled via handleMessage delegation detection)
   // This command is intercepted by handleMessage's parseDelegation(),
   // but we register it so grammY doesn't pass it to the text handler.
@@ -1253,7 +1282,7 @@ export function createBot(): Bot {
   });
 
   // Text messages — and any slash commands not owned by this bot (skills, e.g. /todo /gmail)
-  const OWN_COMMANDS = new Set(['/start', '/help', '/newchat', '/respin', '/voice', '/model', '/memory', '/forget', '/pin', '/unpin', '/chatid', '/wa', '/slack', '/dashboard', '/stop', '/agents', '/delegate', '/lock', '/status']);
+  const OWN_COMMANDS = new Set(['/start', '/help', '/newchat', '/respin', '/voice', '/model', '/memory', '/forget', '/pin', '/unpin', '/chatid', '/wa', '/slack', '/dashboard', '/stop', '/agents', '/delegate', '/lock', '/status', '/restart']);
   bot.on('message:text', async (ctx) => {
     const text = ctx.message.text;
     const chatIdStr = ctx.chat!.id.toString();

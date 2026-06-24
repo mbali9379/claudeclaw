@@ -15,6 +15,7 @@ import {
   getMissionTask,
   pausePipeline,
   checkAgentBudget,
+  logToHiveMind,
 } from './db.js';
 import { logger } from './logger.js';
 import { ingestConversationTurn } from './memory-ingest.js';
@@ -27,7 +28,7 @@ import { emitChatEvent } from './state.js';
 
 type Sender = (text: string) => Promise<void>;
 
-/** Max time (ms) a scheduled task can run before being killed. */
+/** Default max time (ms) a scheduled task can run before being killed. */
 const TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
 let sender: Sender;
@@ -43,13 +44,27 @@ const runningTaskIds = new Set<string>();
  * @param send  Function that sends a message to the user's Telegram chat.
  */
 let schedulerAgentId = 'main';
+let schedulerTransport: 'telegram' | 'slack' | undefined;
+let schedulerTaskTimeoutMs = TASK_TIMEOUT_MS;
 
-export function initScheduler(send: Sender, agentId = 'main'): void {
+export function initScheduler(send: Sender, agentId = 'main', transport?: 'telegram' | 'slack'): void {
   if (!ALLOWED_CHAT_ID) {
     logger.warn('ALLOWED_CHAT_ID not set — scheduler will not send results');
   }
   sender = send;
   schedulerAgentId = agentId;
+  schedulerTransport = transport;
+
+  // Load per-agent task timeout if configured in agent.yaml
+  try {
+    const agentConfig = loadAgentConfig(agentId);
+    if (agentConfig.taskTimeoutMs) {
+      schedulerTaskTimeoutMs = agentConfig.taskTimeoutMs;
+      logger.info({ agentId, taskTimeoutMs: agentConfig.taskTimeoutMs }, 'Using per-agent task timeout');
+    }
+  } catch {
+    // main agent has no yaml; use default
+  }
 
   // Recover tasks stuck in 'running' from a previous crash
   const recovered = resetStuckTasks(agentId);
@@ -62,11 +77,11 @@ export function initScheduler(send: Sender, agentId = 'main'): void {
   }
 
   setInterval(() => void runDueTasks(), 60_000);
-  logger.info({ agentId }, 'Scheduler started (checking every 60s)');
+  logger.info({ agentId, transport: schedulerTransport }, 'Scheduler started (checking every 60s)');
 }
 
 async function runDueTasks(): Promise<void> {
-  const tasks = getDueTasks(schedulerAgentId);
+  const tasks = getDueTasks(schedulerAgentId, schedulerTransport);
 
   if (tasks.length > 0) {
     logger.info({ count: tasks.length }, 'Running due scheduled tasks');
@@ -79,6 +94,22 @@ async function runDueTasks(): Promise<void> {
       continue;
     }
 
+    // Staleness check: if the task has a max_delay_minutes and is overdue beyond it, skip.
+    // This prevents stale scans firing after the machine wakes from sleep hours late.
+    if (task.max_delay_minutes) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const overdueMinutes = Math.round((nowSec - task.next_run) / 60);
+      if (overdueMinutes > task.max_delay_minutes) {
+        const nextRun = computeNextRun(task.schedule);
+        updateTaskAfterRun(task.id, nextRun, `Skipped — overdue by ${overdueMinutes}m (max ${task.max_delay_minutes}m)`, 'skipped');
+        logToHiveMind(schedulerAgentId, 'scheduler', 'task_skipped',
+          `Task "${task.prompt.slice(0, 60)}" skipped — overdue by ${overdueMinutes}m`);
+        logger.warn({ taskId: task.id, overdueMinutes, maxDelayMinutes: task.max_delay_minutes }, 'Skipping stale task');
+        void sender(`⏭ Skipped stale task: "${task.prompt.slice(0, 60)}..." — ${overdueMinutes}m overdue (max ${task.max_delay_minutes}m)`).catch(() => {});
+        continue;
+      }
+    }
+
     // Compute next occurrence BEFORE executing so we can lock the task
     // in the DB immediately, preventing re-fire on subsequent ticks.
     const nextRun = computeNextRun(task.schedule);
@@ -87,13 +118,12 @@ async function runDueTasks(): Promise<void> {
 
     logger.info({ taskId: task.id, prompt: task.prompt.slice(0, 60) }, 'Firing task');
 
-    // Route through the message queue so scheduled tasks wait for any
-    // in-flight user message to finish before running. This prevents
-    // two Claude processes from hitting the same session simultaneously.
+    // Scheduled tasks use their own queue key so they never block user messages.
+    // User messages queue on ALLOWED_CHAT_ID; scheduled tasks queue on scheduler-<agentId>.
     const chatId = ALLOWED_CHAT_ID || 'scheduler';
-    messageQueue.enqueue(chatId, async () => {
+    messageQueue.enqueue(`scheduler-${schedulerAgentId}`, async () => {
       const abortController = new AbortController();
-      const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);
+      const timeout = setTimeout(() => abortController.abort(), schedulerTaskTimeoutMs);
 
       try {
         await sender(`Scheduled task running: "${task.prompt.slice(0, 80)}${task.prompt.length > 80 ? '...' : ''}"`);
@@ -103,8 +133,9 @@ async function runDueTasks(): Promise<void> {
         clearTimeout(timeout);
 
         if (result.aborted) {
-          updateTaskAfterRun(task.id, nextRun, 'Timed out after 10 minutes', 'timeout');
-          await sender(`⏱ Task timed out after 10m: "${task.prompt.slice(0, 60)}..." — killed.`);
+          const timeoutMin = Math.round(schedulerTaskTimeoutMs / 60_000);
+          updateTaskAfterRun(task.id, nextRun, `Timed out after ${timeoutMin} minutes`, 'timeout');
+          await sender(`⏱ Task timed out after ${timeoutMin}m: "${task.prompt.slice(0, 60)}..." — killed.`);
           logger.warn({ taskId: task.id }, 'Task timed out');
           return;
         }
@@ -142,10 +173,13 @@ async function runDueTasks(): Promise<void> {
         updateTaskAfterRun(task.id, nextRun, errMsg.slice(0, 500), 'failed');
 
         logger.error({ err, taskId: task.id }, 'Scheduled task failed');
+        // Always log to hive mind — fallback when Slack is unreachable
+        logToHiveMind(schedulerAgentId, 'scheduler', 'task_failed',
+          `Task failed: "${task.prompt.slice(0, 60)}" — ${errMsg.slice(0, 100)}`);
         try {
           await sender(`❌ Task failed: "${task.prompt.slice(0, 60)}..." — ${errMsg.slice(0, 200)}`);
         } catch {
-          // ignore send failure
+          // ignore send failure — failure already recorded to hive mind above
         }
       } finally {
         runningTaskIds.delete(task.id);
@@ -185,7 +219,7 @@ async function runDueMissionTasks(): Promise<void> {
   logger.info({ missionId: mission.id, title: mission.title }, 'Running mission task');
 
   const chatId = ALLOWED_CHAT_ID || 'mission';
-  messageQueue.enqueue(chatId, async () => {
+  messageQueue.enqueue(`mission-${schedulerAgentId}`, async () => {
     const abortController = new AbortController();
     const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);
 
@@ -194,7 +228,7 @@ async function runDueMissionTasks(): Promise<void> {
       clearTimeout(timeout);
 
       if (result.aborted) {
-        completeMissionTask(mission.id, null, 'failed', 'Timed out after 10 minutes');
+        completeMissionTask(mission.id, null, 'failed', `Timed out after ${Math.round(schedulerTaskTimeoutMs / 60_000)} minutes`);
         logger.warn({ missionId: mission.id }, 'Mission task timed out');
         try { await sender('Mission task timed out: "' + mission.title + '"'); } catch {}
       } else {
@@ -273,6 +307,9 @@ async function runDueMissionTasks(): Promise<void> {
         completeMissionTask(mission.id, null, 'failed', errMsg.slice(0, 500));
       }
       logger.error({ err, missionId: mission.id }, 'Mission task failed');
+      // Always log to hive mind — fallback when Slack is unreachable
+      logToHiveMind(schedulerAgentId, 'scheduler', 'task_failed',
+        `Mission failed: "${mission.title}" — ${errMsg.slice(0, 100)}`);
     } finally {
       runningTaskIds.delete(missionKey);
     }

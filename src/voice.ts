@@ -109,6 +109,32 @@ function httpsGet(url: string): Promise<Buffer> {
   });
 }
 
+/**
+ * Download a Slack file to a local temp path and return the path.
+ * Slack `url_private_download` requires a bearer token in the Authorization header.
+ */
+export async function downloadSlackFile(
+  botToken: string,
+  url: string,
+  destDir: string,
+  filenameHint?: string,
+): Promise<string> {
+  mkdirSync(destDir, { recursive: true });
+
+  const buffer = await httpsRequest(url, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${botToken}` },
+  });
+
+  const rawExt = filenameHint ? path.extname(filenameHint).toLowerCase() : '';
+  const ext = rawExt === '.oga' ? '.ogg' : (rawExt || '.ogg');
+  const filename = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}${ext}`;
+  const localPath = path.join(destDir, filename);
+  fs.writeFileSync(localPath, buffer);
+
+  return localPath;
+}
+
 // ── STT: Groq Whisper ───────────────────────────────────────────────────────
 
 /**

@@ -357,6 +357,13 @@ function runMigrations(database: Database.Database): void {
   if (!taskColNames.includes('last_status')) {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN last_status TEXT`);
   }
+  if (!taskColNames.includes('max_delay_minutes')) {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN max_delay_minutes INTEGER`);
+  }
+  // Dual-transport for main agent. Sub-agents are single-transport (ignored).
+  if (!taskColNames.includes('destination')) {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN destination TEXT NOT NULL DEFAULT 'telegram'`);
+  }
 
   // ── Memory V2 migration ──────────────────────────────────────────────
   // Detect old schema (has 'sector' column but no 'importance') and migrate.
@@ -948,7 +955,9 @@ export interface ScheduledTask {
   created_at: number;
   agent_id: string;
   started_at: number | null;
-  last_status: 'success' | 'failed' | 'timeout' | null;
+  last_status: 'success' | 'failed' | 'timeout' | 'skipped' | null;
+  max_delay_minutes: number | null;
+  destination: 'telegram' | 'slack';
 }
 
 export function createScheduledTask(
@@ -957,16 +966,41 @@ export function createScheduledTask(
   schedule: string,
   nextRun: number,
   agentId = 'main',
+  maxDelayMinutes?: number,
+  destination: 'telegram' | 'slack' = 'telegram',
 ): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(
-    `INSERT INTO scheduled_tasks (id, prompt, schedule, next_run, status, created_at, agent_id)
-     VALUES (?, ?, ?, ?, 'active', ?, ?)`,
-  ).run(id, prompt, schedule, nextRun, now, agentId);
+    `INSERT INTO scheduled_tasks (id, prompt, schedule, next_run, status, created_at, agent_id, max_delay_minutes, destination)
+     VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+  ).run(id, prompt, schedule, nextRun, now, agentId, maxDelayMinutes ?? null, destination);
 }
 
-export function getDueTasks(agentId = 'main'): ScheduledTask[] {
+export function setTaskMaxDelay(id: string, maxDelayMinutes: number | null): void {
+  db.prepare(`UPDATE scheduled_tasks SET max_delay_minutes = ? WHERE id = ?`).run(maxDelayMinutes, id);
+}
+
+export function setTaskDestination(id: string, destination: 'telegram' | 'slack'): void {
+  db.prepare(`UPDATE scheduled_tasks SET destination = ? WHERE id = ?`).run(destination, id);
+}
+
+/**
+ * Get tasks due for an agent. For main (dual transport), pass `transport`
+ * to filter to tasks bound to that transport — the other main process
+ * (running the other transport) will see and fire its own subset.
+ * Sub-agents ignore `transport` since they only run one transport each.
+ */
+export function getDueTasks(agentId = 'main', transport?: 'telegram' | 'slack'): ScheduledTask[] {
   const now = Math.floor(Date.now() / 1000);
+  if (agentId === 'main' && transport) {
+    return db
+      .prepare(
+        `SELECT * FROM scheduled_tasks
+         WHERE status = 'active' AND next_run <= ? AND agent_id = ? AND destination = ?
+         ORDER BY next_run`,
+      )
+      .all(now, agentId, transport) as ScheduledTask[];
+  }
   return db
     .prepare(
       `SELECT * FROM scheduled_tasks WHERE status = 'active' AND next_run <= ? AND agent_id = ? ORDER BY next_run`,
@@ -1008,7 +1042,7 @@ export function updateTaskAfterRun(
   id: string,
   nextRun: number,
   result: string,
-  lastStatus: 'success' | 'failed' | 'timeout' = 'success',
+  lastStatus: 'success' | 'failed' | 'timeout' | 'skipped' = 'success',
 ): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(

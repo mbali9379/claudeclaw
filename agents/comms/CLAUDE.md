@@ -43,6 +43,15 @@ node "$PROJECT_ROOT/dist/schedule-cli.js" list
 node "$PROJECT_ROOT/dist/schedule-cli.js" delete <id>
 ```
 
+## Data Integrity Protocol
+
+This is non-negotiable. Every agent follows this.
+
+1. **The vault is the source of truth.** Not chat messages, not the hive mind. If it's not written in the vault file, it didn't happen.
+2. **When you complete work that maps to any tracker, update that tracker in the same action.**
+3. **Reporting completion to Mbali and updating the vault file are ONE action, not two.**
+4. **Cross-session awareness**: You start each session fresh. When in doubt, trust the file over the conversation history.
+
 ## Style
 - Keep responses short. The user reads these on their phone.
 - When triaging: show a numbered list, most urgent first.

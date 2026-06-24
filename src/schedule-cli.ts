@@ -21,6 +21,11 @@ import {
   deleteScheduledTask,
   pauseScheduledTask,
   resumeScheduledTask,
+  setTaskMaxDelay,
+  setTaskDestination,
+  logToHiveMind,
+  getHiveMindEntries,
+  getOtherAgentActivity,
 } from './db.js';
 import { computeNextRun } from './scheduler.js';
 
@@ -51,10 +56,21 @@ switch (command) {
     const cron = rest[1];
 
     if (!prompt || !cron) {
-      console.error('Usage: schedule-cli create "prompt" "cron expression"');
-      console.error('Example: schedule-cli create "Summarise AI news" "0 9 * * 1"');
+      console.error('Usage: schedule-cli create "prompt" "cron expression" [--max-delay <minutes>] [--destination <telegram|slack>]');
+      console.error('Example: schedule-cli create "Summarise AI news" "0 9 * * 1" --max-delay 90 --destination slack');
       process.exit(1);
     }
+
+    const maxDelayIdx = cleanedArgv.indexOf('--max-delay');
+    const maxDelayMinutes = maxDelayIdx !== -1 ? parseInt(cleanedArgv[maxDelayIdx + 1] ?? '', 10) : undefined;
+
+    const destIdx = cleanedArgv.indexOf('--destination');
+    const destRaw = destIdx !== -1 ? cleanedArgv[destIdx + 1] : undefined;
+    if (destRaw && destRaw !== 'telegram' && destRaw !== 'slack') {
+      console.error(`Invalid --destination "${destRaw}". Must be 'telegram' or 'slack'.`);
+      process.exit(1);
+    }
+    const destination = (destRaw as 'telegram' | 'slack' | undefined) ?? 'telegram';
 
     let nextRun: number;
     try {
@@ -66,13 +82,38 @@ switch (command) {
     }
 
     const id = randomBytes(4).toString('hex');
-    createScheduledTask(id, prompt, cron, nextRun, cliAgentId);
+    createScheduledTask(id, prompt, cron, nextRun, cliAgentId, maxDelayMinutes, destination);
 
     console.log(`Task created: ${id}`);
     console.log(`Agent:        ${cliAgentId}`);
     console.log(`Prompt:       ${prompt}`);
     console.log(`Schedule:     ${cron}`);
     console.log(`Next run:     ${formatDate(nextRun)}`);
+    console.log(`Destination:  ${destination}`);
+    if (maxDelayMinutes) console.log(`Max delay:    ${maxDelayMinutes}m (skip if overdue beyond this)`);
+    break;
+  }
+
+  case 'set-destination': {
+    const [taskId, dest] = rest;
+    if (!taskId || (dest !== 'telegram' && dest !== 'slack')) {
+      console.error('Usage: schedule-cli set-destination <task-id> <telegram|slack>');
+      process.exit(1);
+    }
+    setTaskDestination(taskId, dest);
+    console.log(`Destination for ${taskId} set to ${dest}`);
+    break;
+  }
+
+  case 'set-max-delay': {
+    const [taskId, delayStr] = rest;
+    if (!taskId || !delayStr) {
+      console.error('Usage: schedule-cli set-max-delay <task-id> <minutes>  (use 0 to clear)');
+      process.exit(1);
+    }
+    const minutes = parseInt(delayStr, 10);
+    setTaskMaxDelay(taskId, minutes === 0 ? null : minutes);
+    console.log(`Max delay for ${taskId} set to ${minutes === 0 ? 'none (disabled)' : minutes + 'm'}`);
     break;
   }
 
@@ -119,7 +160,61 @@ switch (command) {
     break;
   }
 
+  case 'hive-mind': {
+    const subcommand = rest[0];
+
+    if (subcommand === 'write') {
+      const action = rest[1];
+      const summary = rest[2];
+      if (!action || !summary) {
+        console.error('Usage: schedule-cli hive-mind write "action" "summary" [--artifacts \'{"key":"value"}\']');
+        process.exit(1);
+      }
+      const artifactsIdx = rest.indexOf('--artifacts');
+      const artifacts = artifactsIdx !== -1 ? rest[artifactsIdx + 1] : undefined;
+      logToHiveMind(cliAgentId, 'scheduler', action, summary, artifacts);
+      console.log(`Hive mind entry written: [${cliAgentId}] ${action} — ${summary.slice(0, 80)}`);
+
+    } else if (subcommand === 'read') {
+      // Optional flags: --action <type> --hours <N> --limit <N> --exclude-self
+      const actionFilterIdx = rest.indexOf('--action');
+      const actionFilter = actionFilterIdx !== -1 ? rest[actionFilterIdx + 1] : undefined;
+      const hoursIdx = rest.indexOf('--hours');
+      const hoursBack = hoursIdx !== -1 ? parseInt(rest[hoursIdx + 1], 10) : 24;
+      const limitIdx = rest.indexOf('--limit');
+      const limit = limitIdx !== -1 ? parseInt(rest[limitIdx + 1], 10) : 20;
+      const excludeSelf = rest.includes('--exclude-self');
+
+      let entries = excludeSelf
+        ? getOtherAgentActivity(cliAgentId, hoursBack, limit)
+        : getHiveMindEntries(limit);
+
+      if (actionFilter) {
+        entries = entries.filter((e) => e.action === actionFilter);
+      }
+
+      if (entries.length === 0) {
+        console.log('No hive mind entries found.');
+      } else {
+        for (const e of entries) {
+          const ts = new Date(e.created_at * 1000).toISOString();
+          console.log(`[${ts}] [${e.agent_id}] ${e.action}`);
+          console.log(`  ${e.summary}`);
+          if (e.artifacts) console.log(`  artifacts: ${e.artifacts}`);
+          console.log();
+        }
+      }
+
+    } else {
+      console.error('Usage: schedule-cli hive-mind write|read [options]');
+      console.error('  write "action" "summary" [--artifacts \'{"key":"value"}\']');
+      console.error('  read [--action <type>] [--hours <N>] [--limit <N>] [--exclude-self]');
+      process.exit(1);
+    }
+    break;
+  }
+
   default:
-    console.error('Commands: create | list | delete | pause | resume');
+    console.error('Commands: create | list | delete | pause | resume | set-max-delay | set-destination | hive-mind');
     process.exit(1);
 }

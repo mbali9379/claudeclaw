@@ -10,9 +10,13 @@ export interface AgentConfig {
   description: string;
   botTokenEnv: string;
   botToken: string;
+  slackBotToken?: string;
+  slackAppToken?: string;
+  slackChannelId?: string;
   model?: string;
   budgetDailyEur?: number;
   budgetWeeklyEur?: number;
+  taskTimeoutMs?: number;
   obsidian?: {
     vault: string;
     folders: string[];
@@ -64,16 +68,36 @@ export function loadAgentConfig(agentId: string): AgentConfig {
   const model = raw['model'] as string | undefined;
   const budgetDailyEur = raw['budget_daily_eur'] as number | undefined;
   const budgetWeeklyEur = raw['budget_weekly_eur'] as number | undefined;
+  const taskTimeoutMs = raw['task_timeout_ms'] as number | undefined;
 
   if (!name || !botTokenEnv) {
     throw new Error(`Agent config ${configPath} must have 'name' and 'telegram_bot_token_env'`);
   }
 
-  const env = readEnvFile([botTokenEnv]);
+  const slackBotTokenEnv = raw['slack_bot_token_env'] as string | undefined;
+  const slackAppTokenEnv = raw['slack_app_token_env'] as string | undefined;
+  const slackChannelIdEnv = raw['slack_channel_id_env'] as string | undefined;
+
+  const tokenKeys = [botTokenEnv];
+  if (slackBotTokenEnv) tokenKeys.push(slackBotTokenEnv);
+  if (slackAppTokenEnv) tokenKeys.push(slackAppTokenEnv);
+  if (slackChannelIdEnv) tokenKeys.push(slackChannelIdEnv);
+
+  const env = readEnvFile(tokenKeys);
   const botToken = process.env[botTokenEnv] || env[botTokenEnv] || '';
   if (!botToken) {
     throw new Error(`Bot token not found: set ${botTokenEnv} in .env`);
   }
+
+  const slackBotToken = slackBotTokenEnv
+    ? (process.env[slackBotTokenEnv] || env[slackBotTokenEnv] || undefined)
+    : undefined;
+  const slackAppToken = slackAppTokenEnv
+    ? (process.env[slackAppTokenEnv] || env[slackAppTokenEnv] || undefined)
+    : undefined;
+  const slackChannelId = slackChannelIdEnv
+    ? (process.env[slackChannelIdEnv] || env[slackChannelIdEnv] || undefined)
+    : undefined;
 
   let obsidian: AgentConfig['obsidian'];
   const obsRaw = raw['obsidian'] as Record<string, unknown> | undefined;
@@ -91,7 +115,7 @@ export function loadAgentConfig(agentId: string): AgentConfig {
     };
   }
 
-  return { name, description, botTokenEnv, botToken, model, budgetDailyEur, budgetWeeklyEur, obsidian };
+  return { name, description, botTokenEnv, botToken, slackBotToken, slackAppToken, slackChannelId, model, budgetDailyEur, budgetWeeklyEur, taskTimeoutMs, obsidian };
 }
 
 /** Update the model field in an agent's agent.yaml file. */
