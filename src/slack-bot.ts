@@ -7,6 +7,8 @@ import {
   STREAM_STRATEGY,
   agentDefaultModel,
   agentSystemPrompt,
+  AGENT_COORD_CHANNEL,
+  ALLOWED_BOT_IDS,
 } from './config.js';
 import { clearSession, getSession, setSession } from './db.js';
 import { logger } from './logger.js';
@@ -261,42 +263,66 @@ export function createSlackBot(opts: SlackBotOptions) {
   // app.message() only fires for messages without a subtype; file_share has a subtype
   // so we use app.event('message') to receive all message events including file uploads.
   app.event('message', async ({ event, client }) => {
-    const message = event as { subtype?: string; text?: string; channel: string; user?: string; files?: SlackFile[] };
-    // Allow plain messages and file_share (voice/audio uploads). Skip everything else.
-    if (message.subtype && message.subtype !== 'file_share') return;
+    const message = event as { subtype?: string; text?: string; channel: string; user?: string; bot_id?: string; files?: SlackFile[] };
+
+    // ── Agent coordination bridge (command-bus) ────────────────────────
+    // Accept a bot_message ONLY when it lands in the coord channel AND comes
+    // from an allowlisted bot_id. Such a message is pre-authorised (it carries
+    // no `user`), skips the per-user gate, and flows through the SAME
+    // kill-phrase + lock + queue path as a normal user message. Our own posts
+    // are never in ALLOWED_BOT_IDS, so this cannot self-loop.
+    const isCoordBot =
+      message.subtype === 'bot_message' &&
+      !!AGENT_COORD_CHANNEL &&
+      message.channel === AGENT_COORD_CHANNEL &&
+      !!message.bot_id &&
+      ALLOWED_BOT_IDS.includes(message.bot_id);
+
+    // Allow plain messages, file_share (voice), and coord bot messages. Skip the rest.
+    if (!isCoordBot && message.subtype && message.subtype !== 'file_share') return;
     const msg = message;
-    if (!msg.user) return;
 
-    // Security gate
-    if (allowedUserId && msg.user !== allowedUserId) {
-      logger.warn({ user: msg.user }, 'Rejected message from unauthorised user');
-      return;
-    }
+    // Per-user security gate — does not apply to pre-authorised coord bot messages.
+    if (!isCoordBot) {
+      if (!msg.user) return;
 
-    if (!allowedUserId) {
-      await client.chat.postMessage({
-        channel: msg.channel,
-        text: `Your Slack user ID is \`${msg.user}\`.\n\nAdd this to your .env:\n\`ALLOWED_SLACK_USER_ID=${msg.user}\`\n\nThen restart.`,
-      });
-      return;
-    }
+      if (allowedUserId && msg.user !== allowedUserId) {
+        logger.warn({ user: msg.user }, 'Rejected message from unauthorised user');
+        return;
+      }
 
-    // Voice/audio handling: transcribe and treat as text input
-    let text = msg.text?.trim() || '';
-    const audioFile = msg.files?.find((f) => f.mimetype?.startsWith('audio/'));
-    if (audioFile?.url_private_download) {
-      try {
-        const localPath = await downloadSlackFile(botToken, audioFile.url_private_download, UPLOADS_DIR, audioFile.name);
-        const transcribed = await transcribeAudio(localPath);
-        text = `[Voice transcribed]: ${transcribed}`;
-      } catch (err) {
-        logger.error({ err, fileId: audioFile.id }, 'Slack voice transcription failed');
-        await client.chat.postMessage({ channel: msg.channel, text: 'Could not transcribe voice message. Try again.' });
+      if (!allowedUserId) {
+        await client.chat.postMessage({
+          channel: msg.channel,
+          text: `Your Slack user ID is \`${msg.user}\`.\n\nAdd this to your .env:\n\`ALLOWED_SLACK_USER_ID=${msg.user}\`\n\nThen restart.`,
+        });
         return;
       }
     }
 
+    // Voice/audio handling: transcribe and treat as text input (user messages only).
+    let text = msg.text?.trim() || '';
+    if (!isCoordBot) {
+      const audioFile = msg.files?.find((f) => f.mimetype?.startsWith('audio/'));
+      if (audioFile?.url_private_download) {
+        try {
+          const localPath = await downloadSlackFile(botToken, audioFile.url_private_download, UPLOADS_DIR, audioFile.name);
+          const transcribed = await transcribeAudio(localPath);
+          text = `[Voice transcribed]: ${transcribed}`;
+        } catch (err) {
+          logger.error({ err, fileId: audioFile.id }, 'Slack voice transcription failed');
+          await client.chat.postMessage({ channel: msg.channel, text: 'Could not transcribe voice message. Try again.' });
+          return;
+        }
+      }
+    }
+
     if (!text) return;
+
+    // Tag coord-bot commands so the receiving agent knows the source.
+    if (isCoordBot) {
+      text = `[Agent message from ${message.bot_id} in #agent-coord]: ${text}`;
+    }
 
     // Kill phrase
     if (checkKillPhrase(text)) {
@@ -306,9 +332,9 @@ export function createSlackBot(opts: SlackBotOptions) {
       return;
     }
 
-    // Lock check
+    // Lock check — a coord bot cannot unlock the session (only the operator can).
     if (isLocked()) {
-      if (unlock(text)) {
+      if (!isCoordBot && unlock(text)) {
         audit({ agentId: AGENT_ID, chatId: msg.channel, action: 'unlock', detail: 'PIN accepted', blocked: false });
         await client.chat.postMessage({ channel: msg.channel, text: 'Unlocked. Session active.' });
       } else {

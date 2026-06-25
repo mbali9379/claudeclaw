@@ -30,6 +30,8 @@ const envConfig = readEnvFile([
   'SECURITY_PIN_HASH',
   'IDLE_LOCK_MINUTES',
   'EMERGENCY_KILL_PHRASE',
+  'AGENT_COORD_CHANNEL',
+  'ALLOWED_BOT_IDS',
 ]);
 
 // ── Multi-agent support ──────────────────────────────────────────────
@@ -201,4 +203,18 @@ export const IDLE_LOCK_MINUTES = parseInt(
 // Emergency kill phrase. Sending this to any bot immediately stops all agents and exits.
 export const EMERGENCY_KILL_PHRASE =
   process.env.EMERGENCY_KILL_PHRASE || envConfig.EMERGENCY_KILL_PHRASE || '';
+
+// ── Agent coordination (bot-to-bot Slack bridge) ─────────────────────
+// Shared Slack channel where allowlisted bots message each other. Command-bus:
+// a message from an allowlisted bot_id in this channel runs as a prompt, through
+// the SAME kill-phrase + lock gates as a user message. Empty = bridge disabled.
+export const AGENT_COORD_CHANNEL =
+  process.env.AGENT_COORD_CHANNEL || envConfig.AGENT_COORD_CHANNEL || '';
+
+// Comma-separated Slack bot_ids (B… shape) allowed to post commands into
+// AGENT_COORD_CHANNEL. Each bot lists the OTHER bot here, never itself.
+export const ALLOWED_BOT_IDS = (process.env.ALLOWED_BOT_IDS || envConfig.ALLOWED_BOT_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
